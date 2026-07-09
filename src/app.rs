@@ -14,11 +14,18 @@ use crate::detect::{AgentKind, find_agent, ps_snapshot};
 use crate::tmux;
 
 const COLLAPSE_THRESHOLD: u16 = 12;
+/// Cap on how long the Working→Done debounce (see `next_state`) can lag a
+/// slow user-configured `@agents-interval` — an agent awaiting its second
+/// confirming Idle read is rechecked on this cadence instead of waiting out
+/// the full interval.
+const CONFIRM_INTERVAL: Duration = Duration::from_secs(2);
 
 pub struct Agent {
     pub pane: tmux::Pane,
     pub kind: AgentKind,
     pub state: AgentState,
+    /// Unsmoothed classify() result, carried to next tick to debounce state.
+    raw: AgentState,
 }
 
 enum Row {
@@ -27,16 +34,41 @@ enum Row {
 }
 
 /// Idle after Working means the agent finished a task → Done. Done sticks
-/// until the agent starts working again (or blocks).
-fn next_state(new: AgentState, prev: Option<AgentState>) -> AgentState {
-    match (new, prev) {
-        (AgentState::Idle, Some(AgentState::Working | AgentState::Done)) => AgentState::Done,
-        _ => new,
+/// until the agent starts working again (or blocks). A single-tick Idle
+/// reading right after Working is held over as Working instead of flashing
+/// Done — a real stop reads Idle again next tick and confirms the flip.
+fn next_state(raw: AgentState, prev_state: Option<AgentState>, prev_raw: Option<AgentState>) -> AgentState {
+    use AgentState::*;
+    match raw {
+        Idle => match prev_state {
+            Some(Working | Done) if prev_raw == Some(Idle) => Done,
+            Some(s @ (Working | Done)) => s,
+            _ => Idle,
+        },
+        other => other,
+    }
+}
+
+/// Record this tick's states/raws, keeping prior entries for panes absent
+/// this tick (a transient capture/detect miss shouldn't wipe debounce
+/// history) instead of rebuilding the maps from scratch.
+// ponytail: entries for panes that close permanently linger for the sidebar's lifetime; fine, tmux pane ids aren't reused within a server run
+fn record_history(
+    states: &mut HashMap<String, AgentState>,
+    raw: &mut HashMap<String, AgentState>,
+    agents: &[Agent],
+) {
+    for a in agents {
+        states.insert(a.pane.id.clone(), a.state);
+        raw.insert(a.pane.id.clone(), a.raw);
     }
 }
 
 // ponytail: synchronous fork-per-pane each tick; fine for a handful of agents, batch/async if pane count grows
-fn refresh(prev: &HashMap<String, AgentState>) -> io::Result<Vec<Agent>> {
+fn refresh(
+    prev_states: &HashMap<String, AgentState>,
+    prev_raw: &HashMap<String, AgentState>,
+) -> io::Result<Vec<Agent>> {
     let panes = tmux::list_panes()?;
     let procs = ps_snapshot()?;
     let own = std::env::var("TMUX_PANE").unwrap_or_default();
@@ -46,8 +78,13 @@ fn refresh(prev: &HashMap<String, AgentState>) -> io::Result<Vec<Agent>> {
         .filter_map(|pane| {
             let text = tmux::capture(&pane.id).ok()?;
             let kind = find_agent(&procs, pane.pid).or_else(|| AgentKind::from_pane_text(&text))?;
-            let state = next_state(classify(&text), prev.get(&pane.id).copied());
-            Some(Agent { pane, kind, state })
+            let raw = classify(&text);
+            let state = next_state(
+                raw,
+                prev_states.get(&pane.id).copied(),
+                prev_raw.get(&pane.id).copied(),
+            );
+            Some(Agent { pane, kind, state, raw })
         })
         .collect();
     agents.sort_by(|a, b| {
@@ -211,7 +248,8 @@ fn event_loop(
     collapsed_width: u16,
 ) -> io::Result<()> {
     let mut prev_states = HashMap::new();
-    let mut agents = refresh(&prev_states)?;
+    let mut prev_raw = HashMap::new();
+    let mut agents = refresh(&prev_states, &prev_raw)?;
     let mut rows = build_rows(&agents);
     let mut list_state = ListState::default();
     let mut last_tick = Instant::now();
@@ -222,7 +260,16 @@ fn event_loop(
         let spin = (start.elapsed().as_millis() / 100) as usize;
         terminal.draw(|f| render(f, &agents, &rows, &mut list_state, spin))?;
 
-        let mut timeout = interval.saturating_sub(last_tick.elapsed());
+        let pending_confirmation = agents
+            .iter()
+            .any(|a| a.raw == AgentState::Idle && matches!(a.state, AgentState::Working));
+        let refresh_interval = if pending_confirmation {
+            interval.min(CONFIRM_INTERVAL)
+        } else {
+            interval
+        };
+
+        let mut timeout = refresh_interval.saturating_sub(last_tick.elapsed());
         if agents.iter().any(|a| matches!(a.state, AgentState::Working)) {
             timeout = timeout.min(Duration::from_millis(100));
         }
@@ -255,17 +302,14 @@ fn event_loop(
             }
         }
 
-        if last_tick.elapsed() >= interval {
+        if last_tick.elapsed() >= refresh_interval {
             let selected_pane = match list_state.selected().and_then(|s| rows.get(s)) {
                 Some(Row::Agent(i)) => Some(agents[*i].pane.id.clone()),
                 _ => None,
             };
-            prev_states = agents
-                .iter()
-                .map(|a| (a.pane.id.clone(), a.state))
-                .collect();
+            record_history(&mut prev_states, &mut prev_raw, &agents);
             // Server gone → refresh errors → exit cleanly.
-            agents = refresh(&prev_states)?;
+            agents = refresh(&prev_states, &prev_raw)?;
             rows = build_rows(&agents);
             if let Some(id) = selected_pane {
                 list_state.select(
@@ -295,18 +339,53 @@ mod tests {
             },
             kind: AgentKind::Claude,
             state: AgentState::Idle,
+            raw: AgentState::Idle,
         }
     }
 
     #[test]
     fn done_transitions() {
         use AgentState::*;
-        assert_eq!(next_state(Idle, Some(Working)), Done); // finished
-        assert_eq!(next_state(Idle, Some(Done)), Done); // sticks
-        assert_eq!(next_state(Idle, Some(Idle)), Idle); // never worked
-        assert_eq!(next_state(Idle, None), Idle); // fresh sidebar
-        assert_eq!(next_state(Working, Some(Done)), Working); // new task clears
-        assert_eq!(next_state(Blocked, Some(Working)), Blocked);
+        // Idle confirmed two ticks in a row → Done.
+        assert_eq!(next_state(Idle, Some(Working), Some(Idle)), Done);
+        assert_eq!(next_state(Idle, Some(Done), Some(Idle)), Done); // sticks
+        assert_eq!(next_state(Idle, Some(Idle), Some(Idle)), Idle); // never worked
+        assert_eq!(next_state(Idle, None, None), Idle); // fresh sidebar
+        assert_eq!(next_state(Working, Some(Done), Some(Idle)), Working); // new task clears
+        assert_eq!(next_state(Blocked, Some(Working), Some(Working)), Blocked);
+    }
+
+    #[test]
+    fn idle_blip_held_as_working_for_one_tick() {
+        use AgentState::*;
+        // First Idle reading right after Working: displayed state holds,
+        // doesn't flash Done.
+        assert_eq!(next_state(Idle, Some(Working), Some(Working)), Working);
+        // Confirmed on the next tick.
+        assert_eq!(next_state(Idle, Some(Working), Some(Idle)), Done);
+    }
+
+    #[test]
+    fn record_history_survives_transient_pane_dropout() {
+        use AgentState::*;
+        let mut states = HashMap::new();
+        let mut raw = HashMap::new();
+
+        let mut a = agent("a", 1);
+        a.state = Working;
+        a.raw = Working;
+        record_history(&mut states, &mut raw, &[a]);
+
+        // Pane transiently drops out of refresh() (e.g. capture error) —
+        // history for it must not be wiped.
+        record_history(&mut states, &mut raw, &[]);
+
+        // Reappears reading Idle: still held as Working (blip), not reset
+        // to a fresh Idle with no history.
+        assert_eq!(
+            next_state(Idle, states.get("%1").copied(), raw.get("%1").copied()),
+            Working
+        );
     }
 
     #[test]

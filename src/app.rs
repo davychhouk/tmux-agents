@@ -19,6 +19,7 @@ const COLLAPSE_THRESHOLD: u16 = 12;
 /// confirming Idle read is rechecked on this cadence instead of waiting out
 /// the full interval.
 const CONFIRM_INTERVAL: Duration = Duration::from_secs(2);
+const SELECTED_BG: Color = Color::Rgb(51, 65, 90);
 
 pub struct Agent {
     pub pane: tmux::Pane,
@@ -185,9 +186,9 @@ fn render(frame: &mut Frame, agents: &[Agent], rows: &[Row], list_state: &mut Li
             Row::Agent(i) => {
                 let a = &agents[*i];
                 let (icon, style) = state_style(a.state, spin);
-                let (bar, kind_style, name_style) = if selected == Some(idx) {
+                let is_selected = selected == Some(idx);
+                let (kind_style, name_style) = if is_selected {
                     (
-                        "▌",
                         Style::default()
                             .fg(Color::White)
                             .add_modifier(Modifier::BOLD),
@@ -195,25 +196,34 @@ fn render(frame: &mut Frame, agents: &[Agent], rows: &[Row], list_state: &mut Li
                     )
                 } else {
                     (
-                        " ",
                         Style::default(),
                         Style::default().fg(Color::DarkGray),
                     )
                 };
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!(" {bar}"), Style::default().fg(Color::Cyan)),
-                    Span::styled(format!("{icon} "), style),
+                let item = ListItem::new(Line::from(vec![
+                    Span::styled(format!(" {icon} "), style),
                     Span::styled(format!("{:<6} ", a.kind.label()), kind_style),
                     Span::styled(
                         format!("{}:{}", a.pane.window_index, a.pane.window_name),
                         name_style,
                     ),
-                ]))
+                ]));
+                if is_selected {
+                    item.style(Style::default().bg(SELECTED_BG))
+                } else {
+                    item
+                }
             }
         })
         .collect();
+    let heights: Vec<usize> = items.iter().map(ListItem::height).collect();
     let list = List::new(items);
     frame.render_stateful_widget(list, list_area, list_state);
+    if let Some(sel) = list_state.selected() {
+        let offset = list_state.offset().min(sel);
+        let y: usize = heights[offset..sel].iter().sum();
+        frame.set_cursor_position((list_area.x, list_area.y + y as u16));
+    }
 }
 
 fn render_collapsed(frame: &mut Frame, agents: &[Agent], area: Rect, spin: usize) {

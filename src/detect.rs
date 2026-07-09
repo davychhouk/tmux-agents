@@ -50,7 +50,7 @@ fn parse_ps(out: &str) -> Vec<Proc> {
         .collect()
 }
 
-/// First claude/codex found in the descendant tree of `root` (BFS).
+/// First claude/codex found in the descendant tree of `root` (DFS).
 pub fn find_agent(procs: &[Proc], root: u32) -> Option<AgentKind> {
     let mut queue = vec![root];
     while let Some(pid) = queue.pop() {

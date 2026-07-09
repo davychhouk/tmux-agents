@@ -1,3 +1,248 @@
-pub fn run() -> std::io::Result<()> {
-    todo!("task 6")
+use std::io;
+use std::time::{Duration, Instant};
+
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{List, ListItem, ListState};
+use ratatui::Frame;
+
+use crate::classify::{classify, AgentState};
+use crate::detect::{find_agent, ps_snapshot, AgentKind};
+use crate::tmux;
+
+const COLLAPSE_THRESHOLD: u16 = 12;
+
+pub struct Agent {
+    pub pane: tmux::Pane,
+    pub kind: AgentKind,
+    pub state: AgentState,
+}
+
+enum Row {
+    Header(String),
+    Agent(usize),
+}
+
+fn refresh() -> io::Result<Vec<Agent>> {
+    let panes = tmux::list_panes()?;
+    let procs = ps_snapshot()?;
+    let own = std::env::var("TMUX_PANE").unwrap_or_default();
+    let mut agents: Vec<Agent> = panes
+        .into_iter()
+        .filter(|p| p.id != own)
+        .filter_map(|pane| {
+            let kind = find_agent(&procs, pane.pid)?;
+            let state = classify(&tmux::capture(&pane.id).ok()?);
+            Some(Agent { pane, kind, state })
+        })
+        .collect();
+    agents.sort_by(|a, b| {
+        (&a.pane.session, a.pane.window_index).cmp(&(&b.pane.session, b.pane.window_index))
+    });
+    Ok(agents)
+}
+
+fn build_rows(agents: &[Agent]) -> Vec<Row> {
+    let mut rows = Vec::new();
+    let mut current: Option<&str> = None;
+    for (i, agent) in agents.iter().enumerate() {
+        if current != Some(agent.pane.session.as_str()) {
+            current = Some(agent.pane.session.as_str());
+            rows.push(Row::Header(agent.pane.session.clone()));
+        }
+        rows.push(Row::Agent(i));
+    }
+    rows
+}
+
+/// Next selectable (agent) row from `from` in direction `dir`; clamps at
+/// ends. `from` of None or a non-agent row selects the first agent row.
+fn next_agent_row(rows: &[Row], from: Option<usize>, dir: i32) -> Option<usize> {
+    let agent_rows: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| matches!(r, Row::Agent(_)).then_some(i))
+        .collect();
+    let pos = from.and_then(|cur| agent_rows.iter().position(|&i| i == cur));
+    let next = match pos {
+        None => 0,
+        Some(p) if dir > 0 => (p + 1).min(agent_rows.len().saturating_sub(1)),
+        Some(p) => p.saturating_sub(1),
+    };
+    agent_rows.get(next).copied()
+}
+
+fn state_style(state: AgentState) -> (char, Style) {
+    match state {
+        AgentState::Working => ('●', Style::default().fg(Color::Yellow)),
+        AgentState::Blocked => ('●', Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        AgentState::Idle => ('●', Style::default().fg(Color::DarkGray)),
+    }
+}
+
+fn render(frame: &mut Frame, agents: &[Agent], rows: &[Row], list_state: &mut ListState) {
+    let area = frame.area();
+    if area.width < COLLAPSE_THRESHOLD {
+        render_collapsed(frame, agents, area);
+        return;
+    }
+    let items: Vec<ListItem> = rows
+        .iter()
+        .map(|row| match row {
+            Row::Header(session) => ListItem::new(Line::from(Span::styled(
+                session.clone(),
+                Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ))),
+            Row::Agent(i) => {
+                let a = &agents[*i];
+                let (icon, style) = state_style(a.state);
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!(" {icon} "), style),
+                    Span::raw(format!("{:<6} ", a.kind.label())),
+                    Span::styled(a.pane.window_name.clone(), Style::default().fg(Color::Gray)),
+                ]))
+            }
+        })
+        .collect();
+    let list = List::new(items).highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    frame.render_stateful_widget(list, area, list_state);
+}
+
+fn render_collapsed(frame: &mut Frame, agents: &[Agent], area: Rect) {
+    let items: Vec<ListItem> = agents
+        .iter()
+        .map(|a| {
+            let (icon, style) = state_style(a.state);
+            ListItem::new(Line::from(Span::styled(format!(" {icon}"), style)))
+        })
+        .collect();
+    frame.render_widget(List::new(items), area);
+}
+
+pub fn run() -> io::Result<()> {
+    let interval: u64 = tmux::option("@agents-interval", "1").parse().unwrap_or(1);
+    let interval = Duration::from_secs(interval.max(1));
+    let width: u16 = tmux::option("@agents-width", "32").parse().unwrap_or(32);
+    let collapsed_width: u16 = tmux::option("@agents-collapsed-width", "6").parse().unwrap_or(6);
+
+    let mut terminal = ratatui::init();
+    let result = event_loop(&mut terminal, interval, width, collapsed_width);
+    ratatui::restore();
+    result
+}
+
+fn event_loop(
+    terminal: &mut ratatui::DefaultTerminal,
+    interval: Duration,
+    width: u16,
+    collapsed_width: u16,
+) -> io::Result<()> {
+    let mut agents = refresh()?;
+    let mut rows = build_rows(&agents);
+    let mut list_state = ListState::default();
+    let mut last_tick = Instant::now();
+    let mut expanded = true;
+
+    loop {
+        terminal.draw(|f| render(f, &agents, &rows, &mut list_state))?;
+
+        let timeout = interval.saturating_sub(last_tick.elapsed());
+        if event::poll(timeout)? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                    KeyCode::Char('q') => return Ok(()),
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(());
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        list_state.select(next_agent_row(&rows, list_state.selected(), 1));
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        list_state.select(next_agent_row(&rows, list_state.selected(), -1));
+                    }
+                    KeyCode::Enter => {
+                        if let Some(Row::Agent(i)) =
+                            list_state.selected().and_then(|s| rows.get(s))
+                        {
+                            let _ = tmux::jump(&agents[*i].pane);
+                        }
+                    }
+                    KeyCode::Tab => {
+                        expanded = !expanded;
+                        let _ = tmux::resize_self(if expanded { width } else { collapsed_width });
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+
+        if last_tick.elapsed() >= interval {
+            // Server gone → refresh errors → exit cleanly.
+            agents = refresh()?;
+            rows = build_rows(&agents);
+            if let Some(s) = list_state.selected() {
+                if s >= rows.len() {
+                    list_state.select(next_agent_row(&rows, None, 1));
+                }
+            }
+            last_tick = Instant::now();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::classify::AgentState;
+    use crate::detect::AgentKind;
+    use crate::tmux::Pane;
+
+    fn agent(session: &str, window: u32) -> Agent {
+        Agent {
+            pane: Pane {
+                session: session.into(),
+                window_index: window,
+                window_name: format!("w{window}"),
+                id: format!("%{window}"),
+                pid: 100 + window,
+            },
+            kind: AgentKind::Claude,
+            state: AgentState::Idle,
+        }
+    }
+
+    #[test]
+    fn rows_group_by_session_with_headers() {
+        // build_rows assumes input already sorted (refresh() sorts).
+        let agents = vec![agent("a", 1), agent("a", 2), agent("b", 1)];
+        let rows = build_rows(&agents);
+        // a-header, a:1, a:2, b-header, b:1
+        assert_eq!(rows.len(), 5);
+        assert!(matches!(rows[0], Row::Header(ref s) if s == "a"));
+        assert!(matches!(rows[1], Row::Agent(i) if agents_at(&agents, i) == ("a", 1)));
+        assert!(matches!(rows[3], Row::Header(ref s) if s == "b"));
+    }
+
+    fn agents_at(agents: &[Agent], i: usize) -> (&str, u32) {
+        (&agents[i].pane.session, agents[i].pane.window_index)
+    }
+
+    #[test]
+    fn selection_skips_headers() {
+        let agents = vec![agent("a", 1), agent("b", 1)];
+        let rows = build_rows(&agents); // header, agent, header, agent
+        assert_eq!(next_agent_row(&rows, None, 1), Some(1));
+        assert_eq!(next_agent_row(&rows, Some(1), 1), Some(3));
+        assert_eq!(next_agent_row(&rows, Some(3), 1), Some(3)); // clamp at end
+        assert_eq!(next_agent_row(&rows, Some(3), -1), Some(1));
+        assert_eq!(next_agent_row(&rows, Some(1), -1), Some(1)); // clamp at start
+    }
+
+    #[test]
+    fn no_agents_no_selection() {
+        assert_eq!(next_agent_row(&[], None, 1), None);
+    }
 }

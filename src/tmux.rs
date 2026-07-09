@@ -49,9 +49,11 @@ fn parse_panes(out: &str) -> Vec<Pane> {
         .collect()
 }
 
-/// Last 40 lines of a pane's visible content.
+/// Last 40 lines of a pane's visible content. `-J` rejoins soft-wrapped
+/// lines so a status line split across screen rows (narrow pane) comes
+/// back as one logical line.
 pub fn capture(pane_id: &str) -> io::Result<String> {
-    tmux(&["capture-pane", "-p", "-t", pane_id, "-S", "-40"])
+    tmux(&["capture-pane", "-p", "-J", "-t", pane_id, "-S", "-40"])
 }
 
 /// Global option with default (`show-options -gqv` prints empty when unset).

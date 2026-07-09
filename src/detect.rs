@@ -15,12 +15,30 @@ impl AgentKind {
     }
 
     fn from_command(command: &str) -> Option<Self> {
-        for token in command.split_whitespace() {
-            match token.rsplit('/').next() {
-                Some("claude") => return Some(AgentKind::Claude),
-                Some("codex") => return Some(AgentKind::Codex),
-                _ => {}
+        // Interpreters whose real program is their first argument
+        // (`node /path/to/claude`), not the interpreter itself.
+        const INTERPRETERS: &[&str] =
+            &["node", "bun", "deno", "python", "python3", "ruby", "sh", "bash", "zsh", "fish"];
+
+        fn basename(token: &str) -> Option<&str> {
+            token.rsplit('/').next()
+        }
+        fn kind_of(basename: &str) -> Option<AgentKind> {
+            match basename {
+                "claude" => Some(AgentKind::Claude),
+                "codex" => Some(AgentKind::Codex),
+                _ => None,
             }
+        }
+
+        let mut tokens = command.split_whitespace();
+        let argv0 = basename(tokens.next()?)?;
+        if let Some(kind) = kind_of(argv0) {
+            return Some(kind);
+        }
+        if INTERPRETERS.contains(&argv0) {
+            let script = tokens.find(|t| !t.starts_with('-'))?;
+            return kind_of(basename(script)?);
         }
         None
     }
@@ -131,6 +149,30 @@ mod tests {
     #[test]
     fn no_agent() {
         let procs = vec![p(10, 1, "-fish"), p(20, 10, "vim notes.md")];
+        assert_eq!(find_agent(&procs, 10), None);
+    }
+
+    #[test]
+    fn skips_interpreter_flags_before_script() {
+        let procs = vec![
+            p(10, 1, "fish"),
+            p(20, 10, "node --enable-source-maps /path/to/claude"),
+        ];
+        assert_eq!(find_agent(&procs, 10), Some(AgentKind::Claude));
+    }
+
+    #[test]
+    fn matches_inline_command_flag() {
+        // `bash -lc claude`: claude is bash's -c command string, not a path.
+        let procs = vec![p(10, 1, "fish"), p(20, 10, "bash -lc claude")];
+        assert_eq!(find_agent(&procs, 10), Some(AgentKind::Claude));
+    }
+
+    #[test]
+    fn ignores_stray_arg_matching_agent_name() {
+        // "codex"/"claude" as a plain argument (not argv0, not an
+        // interpreter's script path) must not match.
+        let procs = vec![p(10, 1, "fish"), p(20, 10, "cp draft.md codex")];
         assert_eq!(find_agent(&procs, 10), None);
     }
 

@@ -3,8 +3,8 @@ use std::io;
 use crate::tmux::{option, tmux};
 
 pub fn toggle() -> io::Result<()> {
-    // Panes in the *current* window, with sidebar marker.
-    let out = tmux(&["list-panes", "-F", "#{pane_id}\t#{@agents_sidebar}"])?;
+    // All panes, any session/window, with sidebar marker.
+    let out = tmux(&["list-panes", "-a", "-F", "#{pane_id}\t#{@agents_sidebar}"])?;
     if let Some(id) = out.lines().find_map(|l| {
         let (id, mark) = l.split_once('\t')?;
         (mark == "1").then(|| id.to_string())

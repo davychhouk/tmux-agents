@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState};
@@ -91,51 +91,99 @@ fn row_for_pane(rows: &[Row], agents: &[Agent], pane_id: &str) -> Option<usize> 
         .position(|r| matches!(r, Row::Agent(i) if agents[*i].pane.id == pane_id))
 }
 
-fn state_style(state: AgentState) -> (char, Style) {
+const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+fn state_style(state: AgentState, spin: usize) -> (char, Style) {
     match state {
-        AgentState::Working => ('●', Style::default().fg(Color::Yellow)),
+        AgentState::Working => (
+            SPINNER[spin % SPINNER.len()],
+            Style::default().fg(Color::Yellow),
+        ),
         AgentState::Blocked => (
-            '●',
+            '!',
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
         AgentState::Idle => ('●', Style::default().fg(Color::DarkGray)),
-        AgentState::Done => ('●', Style::default().fg(Color::Green)),
+        AgentState::Done => ('✓', Style::default().fg(Color::Green)),
     }
 }
 
-fn render(frame: &mut Frame, agents: &[Agent], rows: &[Row], list_state: &mut ListState) {
+fn render(frame: &mut Frame, agents: &[Agent], rows: &[Row], list_state: &mut ListState, spin: usize) {
     let area = frame.area();
     if area.width < COLLAPSE_THRESHOLD {
-        render_collapsed(frame, agents, area);
+        render_collapsed(frame, agents, area, spin);
         return;
     }
+    let [title_area, list_area] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
+    frame.render_widget(
+        Line::from(Span::styled(
+            " Agents",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        title_area,
+    );
+    let mut first_header = true;
+    let selected = list_state.selected();
     let items: Vec<ListItem> = rows
         .iter()
-        .map(|row| match row {
-            Row::Header(session) => ListItem::new(Line::from(Span::styled(
-                session.clone(),
-                Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            ))),
+        .enumerate()
+        .map(|(idx, row)| match row {
+            Row::Header(session) => {
+                let header = Line::from(Span::styled(
+                    format!(" {session}"),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                // Blank line above every session group except the first.
+                let lines = if first_header {
+                    first_header = false;
+                    vec![header]
+                } else {
+                    vec![Line::default(), header]
+                };
+                ListItem::new(lines)
+            }
             Row::Agent(i) => {
                 let a = &agents[*i];
-                let (icon, style) = state_style(a.state);
+                let (icon, style) = state_style(a.state, spin);
+                let (bar, kind_style, name_style) = if selected == Some(idx) {
+                    (
+                        "▌",
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(Color::White),
+                    )
+                } else {
+                    (
+                        " ",
+                        Style::default(),
+                        Style::default().fg(Color::DarkGray),
+                    )
+                };
                 ListItem::new(Line::from(vec![
-                    Span::styled(format!(" {icon} "), style),
-                    Span::raw(format!("{:<6} ", a.kind.label())),
-                    Span::styled(a.pane.window_name.clone(), Style::default().fg(Color::Gray)),
+                    Span::styled(format!(" {bar}"), Style::default().fg(Color::Cyan)),
+                    Span::styled(format!("{icon} "), style),
+                    Span::styled(format!("{:<6} ", a.kind.label()), kind_style),
+                    Span::styled(
+                        format!("{}:{}", a.pane.window_index, a.pane.window_name),
+                        name_style,
+                    ),
                 ]))
             }
         })
         .collect();
-    let list = List::new(items).highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-    frame.render_stateful_widget(list, area, list_state);
+    let list = List::new(items);
+    frame.render_stateful_widget(list, list_area, list_state);
 }
 
-fn render_collapsed(frame: &mut Frame, agents: &[Agent], area: Rect) {
+fn render_collapsed(frame: &mut Frame, agents: &[Agent], area: Rect, spin: usize) {
     let items: Vec<ListItem> = agents
         .iter()
         .map(|a| {
-            let (icon, style) = state_style(a.state);
+            let (icon, style) = state_style(a.state, spin);
             ListItem::new(Line::from(Span::styled(format!(" {icon}"), style)))
         })
         .collect();
@@ -168,11 +216,16 @@ fn event_loop(
     let mut list_state = ListState::default();
     let mut last_tick = Instant::now();
     let mut expanded = true;
+    let start = Instant::now();
 
     loop {
-        terminal.draw(|f| render(f, &agents, &rows, &mut list_state))?;
+        let spin = (start.elapsed().as_millis() / 100) as usize;
+        terminal.draw(|f| render(f, &agents, &rows, &mut list_state, spin))?;
 
-        let timeout = interval.saturating_sub(last_tick.elapsed());
+        let mut timeout = interval.saturating_sub(last_tick.elapsed());
+        if agents.iter().any(|a| matches!(a.state, AgentState::Working)) {
+            timeout = timeout.min(Duration::from_millis(100));
+        }
         if event::poll(timeout)? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {

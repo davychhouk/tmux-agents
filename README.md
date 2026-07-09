@@ -1,7 +1,7 @@
 # tmux-agents
 
 Sidebar showing the status of AI coding agents (claude, codex) across all
-tmux sessions. Working / blocked / idle, color-coded. Jump to any agent's
+tmux sessions. Working / blocked / done / idle, color-coded. Jump to any agent's
 pane. Ratatui, single binary, no daemon.
 
 ## Install (TPM)
@@ -36,4 +36,5 @@ renders icon-only below 12 columns, so keep the collapsed width under 12.
 
 Polls `tmux list-panes -a`, walks each pane's process tree for claude/codex
 (including inside nvim terminals), and classifies `capture-pane` output into
-working / blocked / idle.
+working / blocked / idle. An agent that goes from working to idle shows as
+done (green) until it starts working again.

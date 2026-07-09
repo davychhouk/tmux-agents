@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -25,8 +26,17 @@ enum Row {
     Agent(usize),
 }
 
+/// Idle after Working means the agent finished a task → Done. Done sticks
+/// until the agent starts working again (or blocks).
+fn next_state(new: AgentState, prev: Option<AgentState>) -> AgentState {
+    match (new, prev) {
+        (AgentState::Idle, Some(AgentState::Working | AgentState::Done)) => AgentState::Done,
+        _ => new,
+    }
+}
+
 // ponytail: synchronous fork-per-pane each tick; fine for a handful of agents, batch/async if pane count grows
-fn refresh() -> io::Result<Vec<Agent>> {
+fn refresh(prev: &HashMap<String, AgentState>) -> io::Result<Vec<Agent>> {
     let panes = tmux::list_panes()?;
     let procs = ps_snapshot()?;
     let own = std::env::var("TMUX_PANE").unwrap_or_default();
@@ -36,7 +46,7 @@ fn refresh() -> io::Result<Vec<Agent>> {
         .filter_map(|pane| {
             let text = tmux::capture(&pane.id).ok()?;
             let kind = find_agent(&procs, pane.pid).or_else(|| AgentKind::from_pane_text(&text))?;
-            let state = classify(&text);
+            let state = next_state(classify(&text), prev.get(&pane.id).copied());
             Some(Agent { pane, kind, state })
         })
         .collect();
@@ -89,6 +99,7 @@ fn state_style(state: AgentState) -> (char, Style) {
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
         AgentState::Idle => ('●', Style::default().fg(Color::DarkGray)),
+        AgentState::Done => ('●', Style::default().fg(Color::Green)),
     }
 }
 
@@ -151,7 +162,8 @@ fn event_loop(
     width: u16,
     collapsed_width: u16,
 ) -> io::Result<()> {
-    let mut agents = refresh()?;
+    let mut prev_states = HashMap::new();
+    let mut agents = refresh(&prev_states)?;
     let mut rows = build_rows(&agents);
     let mut list_state = ListState::default();
     let mut last_tick = Instant::now();
@@ -195,8 +207,12 @@ fn event_loop(
                 Some(Row::Agent(i)) => Some(agents[*i].pane.id.clone()),
                 _ => None,
             };
+            prev_states = agents
+                .iter()
+                .map(|a| (a.pane.id.clone(), a.state))
+                .collect();
             // Server gone → refresh errors → exit cleanly.
-            agents = refresh()?;
+            agents = refresh(&prev_states)?;
             rows = build_rows(&agents);
             if let Some(id) = selected_pane {
                 list_state.select(
@@ -227,6 +243,17 @@ mod tests {
             kind: AgentKind::Claude,
             state: AgentState::Idle,
         }
+    }
+
+    #[test]
+    fn done_transitions() {
+        use AgentState::*;
+        assert_eq!(next_state(Idle, Some(Working)), Done); // finished
+        assert_eq!(next_state(Idle, Some(Done)), Done); // sticks
+        assert_eq!(next_state(Idle, Some(Idle)), Idle); // never worked
+        assert_eq!(next_state(Idle, None), Idle); // fresh sidebar
+        assert_eq!(next_state(Working, Some(Done)), Working); // new task clears
+        assert_eq!(next_state(Blocked, Some(Working)), Blocked);
     }
 
     #[test]

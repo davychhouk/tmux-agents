@@ -3,6 +3,9 @@ pub enum AgentState {
     Working,
     Blocked,
     Idle,
+    /// Was working, now idle. Set by the app from state transitions;
+    /// `classify()` never returns it (not detectable from pane text alone).
+    Done,
 }
 
 // ponytail: seed patterns; refined against real captures in the fixtures task

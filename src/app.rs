@@ -25,6 +25,7 @@ enum Row {
     Agent(usize),
 }
 
+// ponytail: synchronous fork-per-pane each tick; fine for a handful of agents, batch/async if pane count grows
 fn refresh() -> io::Result<Vec<Agent>> {
     let panes = tmux::list_panes()?;
     let procs = ps_snapshot()?;
@@ -72,6 +73,10 @@ fn next_agent_row(rows: &[Row], from: Option<usize>, dir: i32) -> Option<usize> 
         Some(p) => p.saturating_sub(1),
     };
     agent_rows.get(next).copied()
+}
+
+fn row_for_pane(rows: &[Row], agents: &[Agent], pane_id: &str) -> Option<usize> {
+    rows.iter().position(|r| matches!(r, Row::Agent(i) if agents[*i].pane.id == pane_id))
 }
 
 fn state_style(state: AgentState) -> (char, Style) {
@@ -180,13 +185,17 @@ fn event_loop(
         }
 
         if last_tick.elapsed() >= interval {
+            let selected_pane = match list_state.selected().and_then(|s| rows.get(s)) {
+                Some(Row::Agent(i)) => Some(agents[*i].pane.id.clone()),
+                _ => None,
+            };
             // Server gone → refresh errors → exit cleanly.
             agents = refresh()?;
             rows = build_rows(&agents);
-            if let Some(s) = list_state.selected() {
-                if s >= rows.len() {
-                    list_state.select(next_agent_row(&rows, None, 1));
-                }
+            if let Some(id) = selected_pane {
+                list_state.select(
+                    row_for_pane(&rows, &agents, &id).or_else(|| next_agent_row(&rows, None, 1)),
+                );
             }
             last_tick = Instant::now();
         }
@@ -244,5 +253,21 @@ mod tests {
     #[test]
     fn no_agents_no_selection() {
         assert_eq!(next_agent_row(&[], None, 1), None);
+    }
+
+    #[test]
+    fn selection_pinned_to_pane_across_refresh() {
+        // Select b:2 (pane %2), then agent session "a" disappears.
+        let before = vec![agent("a", 1), agent("b", 2)];
+        let rows = build_rows(&before); // a-hdr, a:1, b-hdr, b:2
+        let selected_id = match rows[3] {
+            Row::Agent(i) => before[i].pane.id.clone(),
+            _ => unreachable!(),
+        };
+        let after = vec![agent("b", 2)];
+        let rows = build_rows(&after); // b-hdr, b:2
+        assert_eq!(row_for_pane(&rows, &after, &selected_id), Some(1));
+        // Selected pane gone entirely → no row.
+        assert_eq!(row_for_pane(&rows, &after, "%99"), None);
     }
 }

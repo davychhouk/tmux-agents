@@ -15,7 +15,9 @@ pub fn toggle() -> io::Result<()> {
 
     let width = option("@agents-width", "32");
     let exe = std::env::current_exe()?;
-    let exe = exe.to_str().ok_or_else(|| io::Error::other("non-utf8 exe path"))?;
+    let exe = exe
+        .to_str()
+        .ok_or_else(|| io::Error::other("non-utf8 exe path"))?;
 
     let mut args = vec!["split-window", "-h", "-f", "-l", width.as_str()];
     if option("@agents-position", "right") == "left" {
@@ -23,6 +25,13 @@ pub fn toggle() -> io::Result<()> {
     }
     args.extend(["-P", "-F", "#{pane_id}", exe]);
     let pane_id = tmux(&args)?;
-    tmux(&["set-option", "-p", "-t", pane_id.trim(), "@agents_sidebar", "1"])?;
+    tmux(&[
+        "set-option",
+        "-p",
+        "-t",
+        pane_id.trim(),
+        "@agents_sidebar",
+        "1",
+    ])?;
     Ok(())
 }

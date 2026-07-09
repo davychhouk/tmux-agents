@@ -26,8 +26,7 @@ pub fn classify(pane_text: &str) -> AgentState {
     if BLOCKED.iter().any(|p| text.contains(p)) {
         return AgentState::Blocked;
     }
-    if WORKING.iter().any(|p| text.contains(p))
-        || pane_text.chars().any(|c| SPINNERS.contains(&c))
+    if WORKING.iter().any(|p| text.contains(p)) || pane_text.chars().any(|c| SPINNERS.contains(&c))
     {
         return AgentState::Working;
     }

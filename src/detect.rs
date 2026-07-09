@@ -24,6 +24,12 @@ impl AgentKind {
         }
         None
     }
+
+    pub fn from_pane_text(text: &str) -> Option<Self> {
+        text.to_ascii_lowercase()
+            .contains("openai codex")
+            .then_some(AgentKind::Codex)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,7 +40,14 @@ pub struct Proc {
 }
 
 pub fn ps_snapshot() -> std::io::Result<Vec<Proc>> {
-    let out = Command::new("ps").args(["-eo", "pid=,ppid=,command="]).output()?;
+    let out = Command::new("ps")
+        .args(["-eo", "pid=,ppid=,command="])
+        .output()?;
+    if !out.status.success() {
+        return Err(std::io::Error::other(
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        ));
+    }
     Ok(parse_ps(&String::from_utf8_lossy(&out.stdout)))
 }
 
@@ -50,16 +63,18 @@ fn parse_ps(out: &str) -> Vec<Proc> {
         .collect()
 }
 
-/// First claude/codex found in the descendant tree of `root` (DFS).
+/// First claude/codex found at `root` or in its descendant tree (DFS).
 pub fn find_agent(procs: &[Proc], root: u32) -> Option<AgentKind> {
     let mut queue = vec![root];
     while let Some(pid) = queue.pop() {
-        for proc in procs.iter().filter(|p| p.ppid == pid) {
-            if let Some(kind) = AgentKind::from_command(&proc.command) {
-                return Some(kind);
-            }
-            queue.push(proc.pid);
+        if let Some(kind) = procs
+            .iter()
+            .find(|p| p.pid == pid)
+            .and_then(|p| AgentKind::from_command(&p.command))
+        {
+            return Some(kind);
         }
+        queue.extend(procs.iter().filter(|p| p.ppid == pid).map(|p| p.pid));
     }
     None
 }
@@ -69,7 +84,17 @@ mod tests {
     use super::*;
 
     fn p(pid: u32, ppid: u32, command: &str) -> Proc {
-        Proc { pid, ppid, command: command.to_string() }
+        Proc {
+            pid,
+            ppid,
+            command: command.to_string(),
+        }
+    }
+
+    #[test]
+    fn finds_agent_as_pane_root() {
+        let procs = vec![p(10, 1, "codex")];
+        assert_eq!(find_agent(&procs, 10), Some(AgentKind::Codex));
     }
 
     #[test]
@@ -96,6 +121,14 @@ mod tests {
     }
 
     #[test]
+    fn finds_codex_from_pane_text() {
+        assert_eq!(
+            AgentKind::from_pane_text(">_ OpenAI Codex (v0.143.0)"),
+            Some(AgentKind::Codex)
+        );
+    }
+
+    #[test]
     fn no_agent() {
         let procs = vec![p(10, 1, "-fish"), p(20, 10, "vim notes.md")];
         assert_eq!(find_agent(&procs, 10), None);
@@ -112,6 +145,13 @@ mod tests {
         let out = "  10     1 -fish\n  20    10 nvim .\n";
         let procs = parse_ps(out);
         assert_eq!(procs.len(), 2);
-        assert_eq!(procs[1], Proc { pid: 20, ppid: 10, command: "nvim .".to_string() });
+        assert_eq!(
+            procs[1],
+            Proc {
+                pid: 20,
+                ppid: 10,
+                command: "nvim .".to_string()
+            }
+        );
     }
 }

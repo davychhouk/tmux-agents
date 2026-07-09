@@ -14,7 +14,9 @@ pub struct Pane {
 pub fn tmux(args: &[&str]) -> io::Result<String> {
     let out = Command::new("tmux").args(args).output()?;
     if !out.status.success() {
-        return Err(io::Error::other(String::from_utf8_lossy(&out.stderr).into_owned()));
+        return Err(io::Error::other(
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -62,7 +64,11 @@ pub fn option(name: &str, default: &str) -> String {
 
 pub fn jump(pane: &Pane) -> io::Result<()> {
     tmux(&["switch-client", "-t", &pane.session])?;
-    tmux(&["select-window", "-t", &format!("{}:{}", pane.session, pane.window_index)])?;
+    tmux(&[
+        "select-window",
+        "-t",
+        &format!("{}:{}", pane.session, pane.window_index),
+    ])?;
     tmux(&["select-pane", "-t", &pane.id])?;
     Ok(())
 }

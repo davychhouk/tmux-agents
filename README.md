@@ -14,12 +14,12 @@ Needs a Rust toolchain on first run (builds the binary). tmux ≥ 3.0.
 
 `prefix a` toggles the sidebar.
 
-| key | action |
-|-----|--------|
-| `j`/`k` | move selection |
+| key     | action               |
+| ------- | -------------------- |
+| `j`/`k` | move selection       |
 | `Enter` | jump to agent's pane |
-| `Tab` | collapse/expand |
-| `q` | close |
+| `Tab`   | collapse/expand      |
+| `q`     | close                |
 
 ## Options
 

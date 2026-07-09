@@ -1,15 +1,15 @@
 use std::io;
 use std::time::{Duration, Instant};
 
+use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState};
-use ratatui::Frame;
 
-use crate::classify::{classify, AgentState};
-use crate::detect::{find_agent, ps_snapshot, AgentKind};
+use crate::classify::{AgentState, classify};
+use crate::detect::{AgentKind, find_agent, ps_snapshot};
 use crate::tmux;
 
 const COLLAPSE_THRESHOLD: u16 = 12;
@@ -34,8 +34,9 @@ fn refresh() -> io::Result<Vec<Agent>> {
         .into_iter()
         .filter(|p| p.id != own)
         .filter_map(|pane| {
-            let kind = find_agent(&procs, pane.pid)?;
-            let state = classify(&tmux::capture(&pane.id).ok()?);
+            let text = tmux::capture(&pane.id).ok()?;
+            let kind = find_agent(&procs, pane.pid).or_else(|| AgentKind::from_pane_text(&text))?;
+            let state = classify(&text);
             Some(Agent { pane, kind, state })
         })
         .collect();
@@ -76,13 +77,17 @@ fn next_agent_row(rows: &[Row], from: Option<usize>, dir: i32) -> Option<usize> 
 }
 
 fn row_for_pane(rows: &[Row], agents: &[Agent], pane_id: &str) -> Option<usize> {
-    rows.iter().position(|r| matches!(r, Row::Agent(i) if agents[*i].pane.id == pane_id))
+    rows.iter()
+        .position(|r| matches!(r, Row::Agent(i) if agents[*i].pane.id == pane_id))
 }
 
 fn state_style(state: AgentState) -> (char, Style) {
     match state {
         AgentState::Working => ('●', Style::default().fg(Color::Yellow)),
-        AgentState::Blocked => ('●', Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        AgentState::Blocked => (
+            '●',
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
         AgentState::Idle => ('●', Style::default().fg(Color::DarkGray)),
     }
 }
@@ -130,7 +135,9 @@ pub fn run() -> io::Result<()> {
     let interval: u64 = tmux::option("@agents-interval", "1").parse().unwrap_or(1);
     let interval = Duration::from_secs(interval.max(1));
     let width: u16 = tmux::option("@agents-width", "32").parse().unwrap_or(32);
-    let collapsed_width: u16 = tmux::option("@agents-collapsed-width", "6").parse().unwrap_or(6);
+    let collapsed_width: u16 = tmux::option("@agents-collapsed-width", "6")
+        .parse()
+        .unwrap_or(6);
 
     let mut terminal = ratatui::init();
     let result = event_loop(&mut terminal, interval, width, collapsed_width);
@@ -168,8 +175,7 @@ fn event_loop(
                         list_state.select(next_agent_row(&rows, list_state.selected(), -1));
                     }
                     KeyCode::Enter => {
-                        if let Some(Row::Agent(i)) =
-                            list_state.selected().and_then(|s| rows.get(s))
+                        if let Some(Row::Agent(i)) = list_state.selected().and_then(|s| rows.get(s))
                         {
                             let _ = tmux::jump(&agents[*i].pane);
                         }
@@ -262,7 +268,7 @@ mod tests {
         let rows = build_rows(&before); // a-hdr, a:1, b-hdr, b:2
         let selected_id = match rows[3] {
             Row::Agent(i) => before[i].pane.id.clone(),
-            _ => unreachable!(),
+            Row::Header(_) => unreachable!(),
         };
         let after = vec![agent("b", 2)];
         let rows = build_rows(&after); // b-hdr, b:2

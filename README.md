@@ -1,0 +1,39 @@
+# tmux-agents
+
+Sidebar showing the status of AI coding agents (claude, codex) across all
+tmux sessions. Working / blocked / idle, color-coded. Jump to any agent's
+pane. Ratatui, single binary, no daemon.
+
+## Install (TPM)
+
+    set -g @plugin 'dvcrn/tmux-agents'
+
+Needs a Rust toolchain on first run (builds the binary). tmux ≥ 3.0.
+
+## Usage
+
+`prefix a` toggles the sidebar.
+
+| key | action |
+|-----|--------|
+| `j`/`k` | move selection |
+| `Enter` | jump to agent's pane |
+| `Tab` | collapse/expand |
+| `q` | close |
+
+## Options
+
+    set -g @agents-position 'right'       # left | right
+    set -g @agents-width '32'             # integer columns (no %)
+    set -g @agents-collapsed-width '6'    # integer columns, keep < 12
+    set -g @agents-key 'a'                # prefix-table key
+    set -g @agents-interval '1'           # poll seconds
+
+Widths are integer column counts; percentages are not supported. The sidebar
+renders icon-only below 12 columns, so keep the collapsed width under 12.
+
+## How it works
+
+Polls `tmux list-panes -a`, walks each pane's process tree for claude/codex
+(including inside nvim terminals), and classifies `capture-pane` output into
+working / blocked / idle.

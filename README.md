@@ -4,6 +4,8 @@ Sidebar showing the status of AI coding agents (claude, codex) across all
 tmux sessions. Working / blocked / done / idle, color-coded. Jump to any agent's
 pane. Ratatui, single binary, no daemon.
 
+<img width="1512" height="950" alt="image" src="https://github.com/user-attachments/assets/e4407b7b-1ed7-4f8e-9d93-5be8076dc9bb" />
+
 ## Install (TPM)
 
     set -g @plugin 'davychhouk/tmux-agents'

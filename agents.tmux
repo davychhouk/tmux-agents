@@ -2,7 +2,7 @@
 set -u
 
 dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo="dvcrn/tmux-agents"
+repo="davychhouk/tmux-agents"
 version="$(tmux show-option -gqv @agents-version)"
 version="${version:-v0.1.0}"
 bin="$dir/bin/tmux-agents"

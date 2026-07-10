@@ -6,7 +6,7 @@ pane. Ratatui, single binary, no daemon.
 
 ## Install (TPM)
 
-    set -g @plugin 'dvcrn/tmux-agents'
+    set -g @plugin 'davychhouk/tmux-agents'
 
 Downloads a prebuilt binary on first run, and re-downloads when the requested
 version changes. If the download fails for any reason (unsupported platform,

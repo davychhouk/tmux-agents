@@ -24,12 +24,12 @@ close it entirely.
 
 ## Options
 
+    set -g @agents-key 'a'                # prefix-table key
     set -g @agents-toggle 'collapsed'     # collapsed | hidden
     set -g @agents-follow 'on'            # sidebar follows window/session switches
     set -g @agents-position 'right'       # left | right
     set -g @agents-width '32'             # integer columns (no %)
-    set -g @agents-collapsed-width '2'    # integer columns, keep < 12
-    set -g @agents-key 'a'                # prefix-table key
+    set -g @agents-collapsed-width '2'    # default: 3 on left, 2 on right; keep < 12
     set -g @agents-interval '1'           # poll seconds
 
 Widths are integer column counts; percentages are not supported. The sidebar

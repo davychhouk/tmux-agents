@@ -56,7 +56,14 @@ pub fn toggle() -> io::Result<()> {
         if option("@agents-toggle", "collapsed") == "hidden" {
             tmux(&["kill-pane", "-t", &id])?;
         } else {
-            let collapsed = option("@agents-collapsed-width", "2");
+            // Left needs a spare column: the pane border sits on the right,
+            // so a 2-wide strip would butt icons against the content.
+            let default = if option("@agents-position", "right") == "left" {
+                "3"
+            } else {
+                "2"
+            };
+            let collapsed = option("@agents-collapsed-width", default);
             let target = if cur == collapsed { &width } else { &collapsed };
             tmux(&["resize-pane", "-t", &id, "-x", target])?;
         }

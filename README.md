@@ -27,7 +27,7 @@ close it entirely.
     set -g @agents-toggle 'collapsed'     # collapsed | hidden
     set -g @agents-position 'right'       # left | right
     set -g @agents-width '32'             # integer columns (no %)
-    set -g @agents-collapsed-width '6'    # integer columns, keep < 12
+    set -g @agents-collapsed-width '2'    # integer columns, keep < 12
     set -g @agents-key 'a'                # prefix-table key
     set -g @agents-interval '1'           # poll seconds
 

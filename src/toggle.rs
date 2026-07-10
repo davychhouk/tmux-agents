@@ -19,7 +19,7 @@ pub fn toggle() -> io::Result<()> {
         if option("@agents-toggle", "collapsed") == "hidden" {
             tmux(&["kill-pane", "-t", &id])?;
         } else {
-            let collapsed = option("@agents-collapsed-width", "6");
+            let collapsed = option("@agents-collapsed-width", "2");
             let target = if cur == collapsed { &width } else { &collapsed };
             tmux(&["resize-pane", "-t", &id, "-x", target])?;
         }

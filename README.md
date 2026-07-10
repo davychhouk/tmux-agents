@@ -25,6 +25,7 @@ close it entirely.
 ## Options
 
     set -g @agents-toggle 'collapsed'     # collapsed | hidden
+    set -g @agents-follow 'on'            # sidebar follows window/session switches
     set -g @agents-position 'right'       # left | right
     set -g @agents-width '32'             # integer columns (no %)
     set -g @agents-collapsed-width '2'    # integer columns, keep < 12

@@ -2,6 +2,43 @@ use std::io;
 
 use crate::tmux::{option, tmux};
 
+/// Move the sidebar into the now-active window, keeping its width (and so
+/// its expanded/collapsed state). Run from tmux hooks on window/session
+/// switches; a no-op when there's no sidebar or it's already there.
+pub fn follow() -> io::Result<()> {
+    if option("@agents-follow", "on") == "off" {
+        return Ok(());
+    }
+    let out = tmux(&[
+        "list-panes",
+        "-a",
+        "-F",
+        "#{pane_id}\t#{pane_width}\t#{session_name}:#{window_index}\t#{@agents_sidebar}",
+    ])?;
+    let Some((id, width, at)) = out.lines().find_map(|l| {
+        let mut f = l.split('\t');
+        let (id, w, at, mark) = (f.next()?, f.next()?, f.next()?, f.next()?);
+        (mark == "1").then(|| (id.to_string(), w.to_string(), at.to_string()))
+    }) else {
+        return Ok(());
+    };
+    // Hook context resolves to the client/session that triggered it.
+    let target = tmux(&["display-message", "-p", "#{session_name}:#{window_index}"])?;
+    let target = target.trim();
+    if target == at {
+        return Ok(());
+    }
+    let mut args = vec![
+        "join-pane", "-d", "-h", "-f", "-l", &width, "-s", &id, "-t", target,
+    ];
+    if option("@agents-position", "right") == "left" {
+        args.push("-b");
+    }
+    // Best-effort: racing with jump()'s own move is fine.
+    let _ = tmux(&args);
+    Ok(())
+}
+
 pub fn toggle() -> io::Result<()> {
     // All panes, any session/window, with sidebar marker and current width.
     let out = tmux(&[

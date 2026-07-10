@@ -35,6 +35,54 @@ close it entirely.
 Widths are integer column counts; percentages are not supported. The sidebar
 renders icon-only below 12 columns, so keep the collapsed width under 12.
 
+## Tech stack
+
+- Rust 2024
+- Ratatui 0.30 with its crossterm backend
+- tmux commands for pane management, capture, options, hooks, and navigation
+- `ps` process snapshots for claude/codex process-tree detection
+- Bash TPM entry script (`agents.tmux`)
+
+The project is a single binary. It has no daemon, socket, IPC layer, database,
+or state files; the sidebar keeps runtime state in memory.
+
+## Project structure
+
+```text
+.
+├── agents.tmux        # TPM entry script; builds/binds/hooks the binary
+├── Cargo.toml         # Rust crate manifest and lint settings
+├── Cargo.lock         # Locked Rust dependencies
+├── README.md          # User and developer documentation
+├── docs/              # Design notes and implementation plans
+└── src/
+    ├── main.rs        # CLI dispatch: default TUI, toggle, follow
+    ├── app.rs         # Polling loop, selection, debounce, jump behavior
+    ├── classify.rs    # Pane text/title/hook state -> agent state
+    ├── detect.rs      # Process snapshot and descendant agent detection
+    ├── tmux.rs        # tmux command wrapper and pane parsing
+    ├── toggle.rs      # Sidebar spawn, collapse/expand, close, follow
+    └── ui.rs          # Expanded list and collapsed icon-strip rendering
+```
+
+## Commands
+
+```sh
+cargo build              # debug build
+cargo build --release    # production binary used by agents.tmux
+cargo test               # unit tests
+cargo fmt --check        # formatting check
+cargo clippy --all-targets
+```
+
+Inside tmux, run the binary directly for local testing:
+
+```sh
+cargo run -- toggle      # create/collapse/expand/close the sidebar
+cargo run                # run the sidebar TUI in the current pane
+cargo run -- follow      # move the sidebar to the active window
+```
+
 ## How it works
 
 Polls `tmux list-panes -a`, walks each pane's process tree for claude/codex

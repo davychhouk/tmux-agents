@@ -131,6 +131,15 @@ fn row_for_pane(rows: &[Row], agents: &[Agent], pane_id: &str) -> Option<usize> 
 
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+fn state_label(state: AgentState) -> &'static str {
+    match state {
+        AgentState::Working => "working",
+        AgentState::Blocked => "blocked",
+        AgentState::Idle => "idle",
+        AgentState::Done => "done",
+    }
+}
+
 fn state_style(state: AgentState, spin: usize) -> (char, Style) {
     match state {
         AgentState::Working => (
@@ -198,12 +207,12 @@ fn render(frame: &mut Frame, agents: &[Agent], rows: &[Row], list_state: &mut Li
                 let a = &agents[*i];
                 let (icon, style) = state_style(a.state, spin);
                 let is_selected = selected == Some(idx);
-                let (kind_style, name_style) = if is_selected {
+                let (kind_style, detail_style) = if is_selected {
                     (
                         Style::default()
                             .fg(Color::White)
                             .add_modifier(Modifier::BOLD),
-                        Style::default().fg(Color::White),
+                        Style::default().fg(Color::Gray),
                     )
                 } else {
                     (
@@ -211,14 +220,20 @@ fn render(frame: &mut Frame, agents: &[Agent], rows: &[Row], list_state: &mut Li
                         Style::default().fg(Color::DarkGray),
                     )
                 };
-                let item = ListItem::new(Line::from(vec![
-                    Span::styled(format!(" {icon} "), style),
-                    Span::styled(format!("{:<6} ", a.kind.label()), kind_style),
-                    Span::styled(
-                        format!("{}:{}", a.pane.window_index, a.pane.window_name),
-                        name_style,
-                    ),
-                ]));
+                let mut top = format!(" {}:{}", a.pane.window_index, a.pane.window_name);
+                if !a.pane.title.is_empty() {
+                    top.push_str(&format!(" · {}", a.pane.title));
+                }
+                let item = ListItem::new(vec![
+                    Line::from(vec![
+                        Span::styled(format!(" {icon}"), style),
+                        Span::styled(top, kind_style),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(format!("   {}", a.kind.label()), detail_style),
+                        Span::styled(format!(" · {}", state_label(a.state)), style),
+                    ]),
+                ]);
                 if is_selected {
                     item.style(Style::default().bg(SELECTED_BG))
                 } else {
@@ -354,6 +369,7 @@ mod tests {
                 window_name: format!("w{window}"),
                 id: format!("%{window}"),
                 pid: 100 + window,
+                title: String::new(),
             },
             kind: AgentKind::Claude,
             state: AgentState::Idle,

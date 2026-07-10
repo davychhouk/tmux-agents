@@ -8,6 +8,7 @@ pub struct Pane {
     pub window_name: String,
     pub id: String,
     pub pid: u32,
+    pub title: String,
 }
 
 /// Run tmux, return stdout. Err if tmux exits nonzero (e.g. server gone).
@@ -26,7 +27,7 @@ pub fn list_panes() -> io::Result<Vec<Pane>> {
         "list-panes",
         "-a",
         "-F",
-        "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_id}\t#{pane_pid}",
+        "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_id}\t#{pane_pid}\t#{pane_title}",
     ])?;
     Ok(parse_panes(&out))
 }
@@ -35,7 +36,7 @@ fn parse_panes(out: &str) -> Vec<Pane> {
     out.lines()
         .filter_map(|line| {
             let f: Vec<&str> = line.split('\t').collect();
-            let [session, window_index, window_name, id, pid] = f.as_slice() else {
+            let [session, window_index, window_name, id, pid, title] = f.as_slice() else {
                 return None;
             };
             Some(Pane {
@@ -44,6 +45,7 @@ fn parse_panes(out: &str) -> Vec<Pane> {
                 window_name: window_name.to_string(),
                 id: id.to_string(),
                 pid: pid.parse().ok()?,
+                title: title.to_string(),
             })
         })
         .collect()
@@ -81,7 +83,8 @@ mod tests {
 
     #[test]
     fn parses_pane_lines() {
-        let out = "work\t1\tapi server\t%3\t4242\nwork\t2\tshell\t%7\t4300\n";
+        let out =
+            "work\t1\tapi server\t%3\t4242\tmy title\nwork\t2\tshell\t%7\t4300\thost\n";
         let panes = parse_panes(out);
         assert_eq!(panes.len(), 2);
         assert_eq!(
@@ -92,6 +95,7 @@ mod tests {
                 window_name: "api server".into(),
                 id: "%3".into(),
                 pid: 4242,
+                title: "my title".into(),
             }
         );
     }

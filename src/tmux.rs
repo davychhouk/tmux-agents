@@ -9,6 +9,9 @@ pub struct Pane {
     pub id: String,
     pub pid: u32,
     pub title: String,
+    /// `@agent_state` pane option, pushed by agent lifecycle hooks.
+    /// Empty when no hook has written it.
+    pub hook_state: String,
 }
 
 /// Run tmux, return stdout. Err if tmux exits nonzero (e.g. server gone).
@@ -27,7 +30,7 @@ pub fn list_panes() -> io::Result<Vec<Pane>> {
         "list-panes",
         "-a",
         "-F",
-        "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_id}\t#{pane_pid}\t#{pane_title}",
+        "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_id}\t#{pane_pid}\t#{pane_title}\t#{@agent_state}",
     ])?;
     Ok(parse_panes(&out))
 }
@@ -36,7 +39,8 @@ fn parse_panes(out: &str) -> Vec<Pane> {
     out.lines()
         .filter_map(|line| {
             let f: Vec<&str> = line.split('\t').collect();
-            let [session, window_index, window_name, id, pid, title] = f.as_slice() else {
+            let [session, window_index, window_name, id, pid, title, hook_state] = f.as_slice()
+            else {
                 return None;
             };
             Some(Pane {
@@ -46,6 +50,7 @@ fn parse_panes(out: &str) -> Vec<Pane> {
                 id: id.to_string(),
                 pid: pid.parse().ok()?,
                 title: title.to_string(),
+                hook_state: hook_state.to_string(),
             })
         })
         .collect()
@@ -119,7 +124,7 @@ mod tests {
     #[test]
     fn parses_pane_lines() {
         let out =
-            "work\t1\tapi server\t%3\t4242\tmy title\nwork\t2\tshell\t%7\t4300\thost\n";
+            "work\t1\tapi server\t%3\t4242\tmy title\tworking\nwork\t2\tshell\t%7\t4300\thost\t\n";
         let panes = parse_panes(out);
         assert_eq!(panes.len(), 2);
         assert_eq!(
@@ -131,8 +136,10 @@ mod tests {
                 id: "%3".into(),
                 pid: 4242,
                 title: "my title".into(),
+                hook_state: "working".into(),
             }
         );
+        assert_eq!(panes[1].hook_state, "");
     }
 
     #[test]

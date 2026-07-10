@@ -96,11 +96,21 @@ fn is_working(seg: &str) -> bool {
         || seg.to_lowercase().contains(INTERRUPT)
 }
 
-/// The selected choice of a live dialog: "❯ 1. Yes", "> Yes (y)". The caret
-/// is required — without it, ordinary numbered output ("1. yesterday…") at
-/// the bottom of an idle agent would read as an approval prompt. "yes" must
-/// also end the word, so "yesterday" never matches.
+/// A live dialog. Either the footer of a select dialog (question picker,
+/// plan approval — these can lack a "Yes" option entirely, so the footer
+/// hints are the only tell), or the selected choice: "❯ 1. Yes",
+/// "> Yes (y)". All three footer hints on one line is the dialog's shape;
+/// prose restating a hint or two ("use Enter to select…") lacks the
+/// navigate hint beside them. The caret is required for choices — without
+/// it, ordinary numbered output ("1. yesterday…") at the bottom of an idle
+/// agent would read as an approval prompt. "yes" must also end the word,
+/// so "yesterday" never matches.
 fn is_blocked(seg: &str) -> bool {
+    let low = seg.to_lowercase();
+    if low.contains("to navigate") && low.contains("enter to select") && low.contains("esc to cancel")
+    {
+        return true;
+    }
     if !starts_with(seg, CARETS) {
         return false;
     }
@@ -110,6 +120,48 @@ fn is_blocked(seg: &str) -> bool {
         .strip_prefix("1. yes")
         .is_some_and(|tail| !tail.starts_with(|c: char| c.is_alphanumeric()));
     numbered || rest.starts_with("yes (y")
+}
+
+/// Agents announce state through the terminal title (OSC 0/2), which tmux
+/// exposes as `pane_title`: a leading braille spinner frame means an active
+/// turn (claude and codex), and codex titles a pending approval "Action
+/// Required". The agent writes the title itself — transcript text can't
+/// forge it — so it outranks anything scraped off the screen. No braille
+/// title is not evidence of idle: a default title is just the hostname, and
+/// an agent nested in nvim may not reach the terminal title at all.
+pub fn classify_pane(pane_text: &str, title: &str) -> AgentState {
+    if title.to_lowercase().contains("action required") {
+        return AgentState::Blocked;
+    }
+    let mut chars = title.chars();
+    if matches!(chars.next(), Some('\u{2800}'..='\u{28FF}')) && chars.next() == Some(' ') {
+        return AgentState::Working;
+    }
+    classify(pane_text)
+}
+
+/// State pushed by the agent's own lifecycle hooks via the `@agent_state`
+/// tmux pane option. Ground truth when present — the agent reports its own
+/// transitions — so it outranks scraping; panes without hooks yield `None`
+/// (empty or unrecognized value) and fall back to the classifier.
+pub fn hook_state(value: &str) -> Option<AgentState> {
+    match value {
+        "working" => Some(AgentState::Working),
+        "blocked" => Some(AgentState::Blocked),
+        "idle" => Some(AgentState::Idle),
+        "done" => Some(AgentState::Done),
+        _ => None,
+    }
+}
+
+/// Claude's ctrl+o transcript viewer replaces the live screen with history;
+/// nothing on it reflects the turn's real state, so the caller should hold
+/// the last known state while it is up.
+pub fn is_transcript_view(pane_text: &str) -> bool {
+    let lines: Vec<&str> = pane_text.lines().collect();
+    let tail = &lines[lines.len().saturating_sub(TAIL_LINES)..];
+    tail.iter()
+        .any(|l| !l.contains('"') && l.to_lowercase().contains("showing detailed transcript"))
 }
 
 pub fn classify(pane_text: &str) -> AgentState {
@@ -154,6 +206,78 @@ mod tests {
         }
         text.push_str("Allow command?\n> Yes (y)\n  No (n)");
         assert_eq!(classify(&text), AgentState::Blocked);
+    }
+
+    #[test]
+    fn blocked_on_select_dialog_footer_without_yes_option() {
+        // Question picker / plan approval: no "Yes" choice, only the footer.
+        let text = "Which approach?\n  ❯ Option A\n    Option B\n\
+                    ↑/↓ to navigate · Enter to select · Esc to cancel";
+        assert_eq!(classify(text), AgentState::Blocked);
+    }
+
+    #[test]
+    fn idle_on_quoted_select_dialog_footer() {
+        let text = "contains = [\"enter to select\", \"esc to cancel\"]";
+        assert_eq!(classify(text), AgentState::Idle);
+    }
+
+    #[test]
+    fn idle_on_prose_restating_footer_hints() {
+        // Unquoted transcript prose carrying two hints but not the full
+        // three-hint footer shape.
+        let text = "Use Enter to select and Esc to cancel when the dialog appears.";
+        assert_eq!(classify(text), AgentState::Idle);
+    }
+
+    #[test]
+    fn blocked_on_codex_action_required_title() {
+        assert_eq!(
+            classify_pane("│ >    │", "Action Required · codex"),
+            AgentState::Blocked
+        );
+    }
+
+    #[test]
+    fn working_on_braille_spinner_title_over_idle_screen() {
+        assert_eq!(
+            classify_pane("│ >    │\n? for shortcuts", "⠧ my-project"),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn working_title_outranks_screen_dialog() {
+        // Mirrors herdr's priorities: the self-reported title beats a
+        // dialog-shaped scrape (e.g. transcript echoing an old prompt).
+        let text = "Do you want to proceed?\n❯ 1. Yes";
+        assert_eq!(classify_pane(text, "⠹ repo"), AgentState::Working);
+    }
+
+    #[test]
+    fn plain_titles_leave_screen_verdict_alone() {
+        assert_eq!(classify_pane("⠹ Running tests", ""), AgentState::Working);
+        assert_eq!(classify_pane("│ >    │", "myhost.local"), AgentState::Idle);
+        // Claude's idle title glyph is not a braille frame.
+        assert_eq!(classify_pane("│ >    │", "✳ my-project"), AgentState::Idle);
+    }
+
+    #[test]
+    fn hook_state_parses_known_values_only() {
+        assert_eq!(hook_state("working"), Some(AgentState::Working));
+        assert_eq!(hook_state("blocked"), Some(AgentState::Blocked));
+        assert_eq!(hook_state("idle"), Some(AgentState::Idle));
+        assert_eq!(hook_state("done"), Some(AgentState::Done));
+        assert_eq!(hook_state(""), None);
+        assert_eq!(hook_state("Working"), None);
+    }
+
+    #[test]
+    fn transcript_view_detected() {
+        assert!(is_transcript_view("line\nShowing detailed transcript · ctrl+o to toggle"));
+        assert!(!is_transcript_view("│ >    │\n? for shortcuts"));
+        // Quoted mention (source/diff) is not the viewer.
+        assert!(!is_transcript_view("contains(\"showing detailed transcript\")"));
     }
 
     #[test]

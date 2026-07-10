@@ -12,7 +12,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState};
 
-use crate::classify::{AgentState, classify};
+use crate::classify::{AgentState, classify, classify_pane, hook_state, is_transcript_view};
 use crate::detect::{AgentKind, find_agent, ps_snapshot};
 use crate::tmux;
 
@@ -41,7 +41,11 @@ enum Row {
 /// until the agent starts working again (or blocks). A single-tick Idle
 /// reading right after Working is held over as Working instead of flashing
 /// Done — a real stop reads Idle again next tick and confirms the flip.
-fn next_state(raw: AgentState, prev_state: Option<AgentState>, prev_raw: Option<AgentState>) -> AgentState {
+fn next_state(
+    raw: AgentState,
+    prev_state: Option<AgentState>,
+    prev_raw: Option<AgentState>,
+) -> AgentState {
     use AgentState::*;
     match raw {
         Idle => match prev_state {
@@ -82,13 +86,41 @@ fn refresh(
         .filter_map(|pane| {
             let text = tmux::capture(&pane.id).ok()?;
             let kind = find_agent(&procs, pane.pid).or_else(|| AgentKind::from_pane_text(&text))?;
-            let raw = classify(&text);
+            let raw = match hook_state(&pane.hook_state) {
+                // Hook-reported state is ground truth, except a live dialog
+                // on screen outranks a non-blocked reading: some dialogs
+                // (question pickers) emit no hook event, so the last hook
+                // write still says working. Screen-only classify() here —
+                // the title spinner can keep running through a mid-turn
+                // dialog, and classify_pane would let it mask the dialog.
+                Some(state) => {
+                    if state != AgentState::Blocked
+                        && !is_transcript_view(&text)
+                        && classify(&text) == AgentState::Blocked
+                    {
+                        AgentState::Blocked
+                    } else {
+                        state
+                    }
+                }
+                // Transcript viewer shows history, not live state: hold the
+                // last reading instead of classifying stale text.
+                None if is_transcript_view(&text) => {
+                    prev_raw.get(&pane.id).copied().unwrap_or(AgentState::Idle)
+                }
+                None => classify_pane(&text, &pane.title),
+            };
             let state = next_state(
                 raw,
                 prev_states.get(&pane.id).copied(),
                 prev_raw.get(&pane.id).copied(),
             );
-            Some(Agent { pane, kind, state, raw })
+            Some(Agent {
+                pane,
+                kind,
+                state,
+                raw,
+            })
         })
         .collect();
     agents.sort_by(|a, b| {
@@ -225,10 +257,7 @@ fn render(
                         Style::default().fg(Color::Gray),
                     )
                 } else {
-                    (
-                        Style::default(),
-                        Style::default().fg(Color::DarkGray),
-                    )
+                    (Style::default(), Style::default().fg(Color::DarkGray))
                 };
                 let mut top = format!(" {}:{}", a.pane.window_index, a.pane.window_name);
                 if !a.pane.title.is_empty() {
@@ -345,7 +374,10 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, interval: Duration) -> io
         };
 
         let mut timeout = refresh_interval.saturating_sub(last_tick.elapsed());
-        if agents.iter().any(|a| matches!(a.state, AgentState::Working)) {
+        if agents
+            .iter()
+            .any(|a| matches!(a.state, AgentState::Working))
+        {
             timeout = timeout.min(Duration::from_millis(100));
         }
         if event::poll(timeout)? {
@@ -374,9 +406,10 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, interval: Duration) -> io
                 Event::FocusGained => {
                     focused = true;
                     if let Ok((session, window)) = tmux::own_window() {
-                        if let Some(a) = agents.iter().find(|a| {
-                            a.pane.session == session && a.pane.window_index == window
-                        }) {
+                        if let Some(a) = agents
+                            .iter()
+                            .find(|a| a.pane.session == session && a.pane.window_index == window)
+                        {
                             list_state.select(row_for_pane(&rows, &agents, &a.pane.id));
                         }
                     }
@@ -421,6 +454,7 @@ mod tests {
                 id: format!("%{window}"),
                 pid: 100 + window,
                 title: String::new(),
+                hook_state: String::new(),
             },
             kind: AgentKind::Claude,
             state: AgentState::Idle,

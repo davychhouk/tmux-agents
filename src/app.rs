@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState};
@@ -152,14 +152,25 @@ fn render(frame: &mut Frame, agents: &[Agent], rows: &[Row], list_state: &mut Li
         render_collapsed(frame, agents, area, spin);
         return;
     }
-    let [title_area, list_area] =
-        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
+    let [title_area, list_area, hints_area] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .areas(area);
     frame.render_widget(
         Line::from(Span::styled(
             " Agents",
             Style::default().add_modifier(Modifier::BOLD),
         )),
         title_area,
+    );
+    frame.render_widget(
+        Line::from(Span::styled(
+            " j/k move · ⏎ jump · q quit",
+            Style::default().fg(Color::DarkGray),
+        )),
+        hints_area,
     );
     let mut first_header = true;
     let selected = list_state.selected();
@@ -217,6 +228,7 @@ fn render(frame: &mut Frame, agents: &[Agent], rows: &[Row], list_state: &mut Li
         })
         .collect();
     let heights: Vec<usize> = items.iter().map(ListItem::height).collect();
+    let list_area = center_vertically(list_area, heights.iter().sum());
     let list = List::new(items);
     frame.render_stateful_widget(list, list_area, list_state);
     if let Some(sel) = list_state.selected() {
@@ -224,6 +236,15 @@ fn render(frame: &mut Frame, agents: &[Agent], rows: &[Row], list_state: &mut Li
         let y: usize = heights[offset..sel].iter().sum();
         frame.set_cursor_position((list_area.x, list_area.y + y as u16));
     }
+}
+
+/// Slice of `area` with the content block centered; full area when the
+/// content doesn't fit (the list then scrolls as before).
+fn center_vertically(area: Rect, content_height: usize) -> Rect {
+    let [centered] = Layout::vertical([Constraint::Length(content_height as u16)])
+        .flex(Flex::Center)
+        .areas(area);
+    centered
 }
 
 fn render_collapsed(frame: &mut Frame, agents: &[Agent], area: Rect, spin: usize) {
@@ -234,6 +255,7 @@ fn render_collapsed(frame: &mut Frame, agents: &[Agent], area: Rect, spin: usize
             ListItem::new(Line::from(Span::styled(format!(" {icon}"), style)))
         })
         .collect();
+    let area = center_vertically(area, items.len());
     frame.render_widget(List::new(items), area);
 }
 

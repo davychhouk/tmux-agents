@@ -29,7 +29,16 @@ pub fn follow() -> io::Result<()> {
         return Ok(());
     }
     let mut args = vec![
-        "join-pane", "-d", "-h", "-f", "-l", &width, "-s", &id, "-t", target,
+        "join-pane",
+        "-d",
+        "-h",
+        "-f",
+        "-l",
+        &width,
+        "-s",
+        &id,
+        "-t",
+        target,
     ];
     if option("@agents-position", "right") == "left" {
         args.push("-b");

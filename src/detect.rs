@@ -17,8 +17,9 @@ impl AgentKind {
     fn from_command(command: &str) -> Option<Self> {
         // Interpreters whose real program is their first argument
         // (`node /path/to/claude`), not the interpreter itself.
-        const INTERPRETERS: &[&str] =
-            &["node", "bun", "deno", "python", "python3", "ruby", "sh", "bash", "zsh", "fish"];
+        const INTERPRETERS: &[&str] = &[
+            "node", "bun", "deno", "python", "python3", "ruby", "sh", "bash", "zsh", "fish",
+        ];
 
         fn basename(token: &str) -> Option<&str> {
             token.rsplit('/').next()

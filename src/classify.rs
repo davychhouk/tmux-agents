@@ -5,9 +5,21 @@ pub enum AgentState {
     Working,
     Blocked,
     Idle,
-    /// Was working, now idle. Set by the app from state transitions;
-    /// `classify()` never returns it (not detectable from pane text alone).
+    /// Was working, now idle. Set by the app from state transitions or a
+    /// Stop hook; `classify()` never returns it (not detectable from pane
+    /// text alone).
     Done,
+}
+
+impl AgentState {
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentState::Working => "working",
+            AgentState::Blocked => "blocked",
+            AgentState::Idle => "idle",
+            AgentState::Done => "done",
+        }
+    }
 }
 
 // Match the shape of the agent's live UI, never bare phrases: an agent's
@@ -79,7 +91,9 @@ fn segments(line: &str, rules: &[usize]) -> Vec<String> {
     }
     segs.push(cur);
     segs.retain(|s| !s.contains('"'));
-    segs.iter_mut().for_each(|s| *s = s.trim().to_string());
+    for s in &mut segs {
+        *s = s.trim().to_string();
+    }
     segs
 }
 
@@ -107,7 +121,9 @@ fn is_working(seg: &str) -> bool {
 /// so "yesterday" never matches.
 fn is_blocked(seg: &str) -> bool {
     let low = seg.to_lowercase();
-    if low.contains("to navigate") && low.contains("enter to select") && low.contains("esc to cancel")
+    if low.contains("to navigate")
+        && low.contains("enter to select")
+        && low.contains("esc to cancel")
     {
         return true;
     }
@@ -129,7 +145,7 @@ fn is_blocked(seg: &str) -> bool {
 /// forge it — so it outranks anything scraped off the screen. No braille
 /// title is not evidence of idle: a default title is just the hostname, and
 /// an agent nested in nvim may not reach the terminal title at all.
-pub fn classify_pane(pane_text: &str, title: &str) -> AgentState {
+fn classify_pane(pane_text: &str, title: &str) -> AgentState {
     if title.to_lowercase().contains("action required") {
         return AgentState::Blocked;
     }
@@ -140,11 +156,41 @@ pub fn classify_pane(pane_text: &str, title: &str) -> AgentState {
     classify(pane_text)
 }
 
+/// Full per-pane state decision, combining every signal in priority order.
+///
+/// `hook` is the `@agent_state` pane option written by the agent's own
+/// lifecycle hooks — ground truth when present, except a live dialog on
+/// screen outranks a non-blocked reading: some dialogs (question pickers)
+/// emit no hook event, so the last hook write still says working. That
+/// override uses the screen-only classifier — the title spinner can keep
+/// running through a mid-turn dialog, and the title-prioritized one would
+/// let it mask the dialog.
+///
+/// Without a hook, the screen+title classifier decides, holding `held`
+/// (the previous reading) while claude's transcript viewer replaces the
+/// live screen with history.
+pub fn resolve_state(text: &str, title: &str, hook: &str, held: Option<AgentState>) -> AgentState {
+    match hook_state(hook) {
+        Some(state) => {
+            if state != AgentState::Blocked
+                && !is_transcript_view(text)
+                && classify(text) == AgentState::Blocked
+            {
+                AgentState::Blocked
+            } else {
+                state
+            }
+        }
+        None if is_transcript_view(text) => held.unwrap_or(AgentState::Idle),
+        None => classify_pane(text, title),
+    }
+}
+
 /// State pushed by the agent's own lifecycle hooks via the `@agent_state`
 /// tmux pane option. Ground truth when present — the agent reports its own
 /// transitions — so it outranks scraping; panes without hooks yield `None`
 /// (empty or unrecognized value) and fall back to the classifier.
-pub fn hook_state(value: &str) -> Option<AgentState> {
+fn hook_state(value: &str) -> Option<AgentState> {
     match value {
         "working" => Some(AgentState::Working),
         "blocked" => Some(AgentState::Blocked),
@@ -157,14 +203,14 @@ pub fn hook_state(value: &str) -> Option<AgentState> {
 /// Claude's ctrl+o transcript viewer replaces the live screen with history;
 /// nothing on it reflects the turn's real state, so the caller should hold
 /// the last known state while it is up.
-pub fn is_transcript_view(pane_text: &str) -> bool {
+fn is_transcript_view(pane_text: &str) -> bool {
     let lines: Vec<&str> = pane_text.lines().collect();
     let tail = &lines[lines.len().saturating_sub(TAIL_LINES)..];
     tail.iter()
         .any(|l| !l.contains('"') && l.to_lowercase().contains("showing detailed transcript"))
 }
 
-pub fn classify(pane_text: &str) -> AgentState {
+fn classify(pane_text: &str) -> AgentState {
     let lines: Vec<&str> = pane_text.lines().collect();
     let tail = &lines[lines.len().saturating_sub(TAIL_LINES)..];
     let rules = rule_columns(tail);
@@ -178,7 +224,6 @@ pub fn classify(pane_text: &str) -> AgentState {
     }
     AgentState::Idle
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -200,10 +245,7 @@ mod tests {
     fn blocked_on_tall_dialog_past_tail_window() {
         // A long command preview pushes the question off the window; only the
         // trailing choice needs to survive.
-        let mut text = String::new();
-        for i in 0..30 {
-            text.push_str(&format!("preview line {i}\n"));
-        }
+        let mut text = (0..30).fold(String::new(), |acc, i| acc + &format!("preview line {i}\n"));
         text.push_str("Allow command?\n> Yes (y)\n  No (n)");
         assert_eq!(classify(&text), AgentState::Blocked);
     }
@@ -263,6 +305,57 @@ mod tests {
     }
 
     #[test]
+    fn resolve_prefers_hook_state() {
+        assert_eq!(
+            resolve_state("│ >    │", "", "working", None),
+            AgentState::Working
+        );
+        assert_eq!(
+            resolve_state("⠹ Running tests", "", "done", None),
+            AgentState::Done
+        );
+    }
+
+    #[test]
+    fn resolve_screen_dialog_overrides_non_blocked_hook() {
+        let dialog = "Do you want to proceed?\n❯ 1. Yes";
+        assert_eq!(
+            resolve_state(dialog, "", "working", None),
+            AgentState::Blocked
+        );
+        // Spinner title must not mask the dialog (screen-only check).
+        assert_eq!(
+            resolve_state(dialog, "⠹ repo", "working", None),
+            AgentState::Blocked
+        );
+        // ...but a dialog in transcript history doesn't override.
+        let viewing = format!("{dialog}\nShowing detailed transcript · ctrl+o to toggle");
+        assert_eq!(
+            resolve_state(&viewing, "", "working", None),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn resolve_holds_previous_reading_during_transcript_view() {
+        let text = "Showing detailed transcript · ctrl+o to toggle";
+        assert_eq!(
+            resolve_state(text, "", "", Some(AgentState::Working)),
+            AgentState::Working
+        );
+        assert_eq!(resolve_state(text, "", "", None), AgentState::Idle);
+    }
+
+    #[test]
+    fn resolve_falls_back_to_screen_and_title() {
+        assert_eq!(
+            resolve_state("│ >    │", "⠧ my-project", "", None),
+            AgentState::Working
+        );
+        assert_eq!(resolve_state("│ >    │", "", "", None), AgentState::Idle);
+    }
+
+    #[test]
     fn hook_state_parses_known_values_only() {
         assert_eq!(hook_state("working"), Some(AgentState::Working));
         assert_eq!(hook_state("blocked"), Some(AgentState::Blocked));
@@ -274,10 +367,14 @@ mod tests {
 
     #[test]
     fn transcript_view_detected() {
-        assert!(is_transcript_view("line\nShowing detailed transcript · ctrl+o to toggle"));
+        assert!(is_transcript_view(
+            "line\nShowing detailed transcript · ctrl+o to toggle"
+        ));
         assert!(!is_transcript_view("│ >    │\n? for shortcuts"));
         // Quoted mention (source/diff) is not the viewer.
-        assert!(!is_transcript_view("contains(\"showing detailed transcript\")"));
+        assert!(!is_transcript_view(
+            "contains(\"showing detailed transcript\")"
+        ));
     }
 
     #[test]
@@ -442,6 +539,3 @@ mod tests {
         assert_eq!(classify("> Yes (y)\");"), AgentState::Idle);
     }
 }
-
-
-

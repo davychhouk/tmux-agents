@@ -3,6 +3,7 @@ mod classify;
 mod detect;
 mod tmux;
 mod toggle;
+mod ui;
 
 fn main() -> std::io::Result<()> {
     match std::env::args().nth(1).as_deref() {

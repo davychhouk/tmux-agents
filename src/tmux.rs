@@ -39,7 +39,15 @@ fn parse_panes(out: &str) -> Vec<Pane> {
     out.lines()
         .filter_map(|line| {
             let f: Vec<&str> = line.split('\t').collect();
-            let [session, window_index, window_name, id, pid, title, hook_state] = f.as_slice()
+            let [
+                session,
+                window_index,
+                window_name,
+                id,
+                pid,
+                title,
+                hook_state,
+            ] = f.as_slice()
             else {
                 return None;
             };
@@ -99,16 +107,26 @@ pub fn jump(pane: &Pane) -> io::Result<()> {
 
     // Bring the sidebar along so it stays visible next to the agent.
     let own = std::env::var("TMUX_PANE").map_err(io::Error::other)?;
-    if let Ok((session, window)) = own_window() {
-        if session == pane.session && window == pane.window_index {
-            return Ok(()); // already in the target window
-        }
+    if let Ok((session, window)) = own_window()
+        && session == pane.session
+        && window == pane.window_index
+    {
+        return Ok(()); // already in the target window
     }
     let width = tmux(&["display-message", "-p", "-t", &own, "#{pane_width}"])?;
     let width = width.trim().to_string();
     // -d keeps focus on the agent pane selected above.
     let mut args = vec![
-        "join-pane", "-d", "-h", "-f", "-l", &width, "-s", &own, "-t", &target,
+        "join-pane",
+        "-d",
+        "-h",
+        "-f",
+        "-l",
+        &width,
+        "-s",
+        &own,
+        "-t",
+        &target,
     ];
     if option("@agents-position", "right") == "left" {
         args.push("-b");

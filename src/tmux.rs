@@ -88,12 +88,27 @@ pub fn own_window() -> io::Result<(String, u32)> {
 
 pub fn jump(pane: &Pane) -> io::Result<()> {
     tmux(&["switch-client", "-t", &pane.session])?;
-    tmux(&[
-        "select-window",
-        "-t",
-        &format!("{}:{}", pane.session, pane.window_index),
-    ])?;
+    let target = format!("{}:{}", pane.session, pane.window_index);
+    tmux(&["select-window", "-t", &target])?;
     tmux(&["select-pane", "-t", &pane.id])?;
+
+    // Bring the sidebar along so it stays visible next to the agent.
+    let own = std::env::var("TMUX_PANE").map_err(io::Error::other)?;
+    if let Ok((session, window)) = own_window() {
+        if session == pane.session && window == pane.window_index {
+            return Ok(()); // already in the target window
+        }
+    }
+    let width = tmux(&["display-message", "-p", "-t", &own, "#{pane_width}"])?;
+    let width = width.trim().to_string();
+    // -d keeps focus on the agent pane selected above.
+    let mut args = vec![
+        "join-pane", "-d", "-h", "-f", "-l", &width, "-s", &own, "-t", &target,
+    ];
+    if option("@agents-position", "right") == "left" {
+        args.push("-b");
+    }
+    tmux(&args)?;
     Ok(())
 }
 

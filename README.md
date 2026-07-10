@@ -8,7 +8,13 @@ pane. Ratatui, single binary, no daemon.
 
     set -g @plugin 'dvcrn/tmux-agents'
 
-Needs a Rust toolchain on first run (builds the binary). tmux ≥ 3.0.
+Downloads a prebuilt binary on first run, and re-downloads when the requested
+version changes. If the download fails for any reason (unsupported platform,
+no `curl`/`wget`, failed checksum), it falls back to `cargo build --release`
+when Rust is installed. Requires tmux ≥ 3.0 and either `curl`/`wget` or a
+Rust toolchain.
+
+Prebuilt binaries are published for macOS and Linux on x86_64 and arm64.
 
 ## Usage
 
@@ -42,6 +48,7 @@ renders icon-only below 12 columns, so keep the collapsed width under 12.
 - tmux commands for pane management, capture, options, hooks, and navigation
 - `ps` process snapshots for claude/codex process-tree detection
 - Bash TPM entry script (`agents.tmux`)
+- GitHub Actions release builds for prebuilt binaries
 
 The project is a single binary. It has no daemon, socket, IPC layer, database,
 or state files; the sidebar keeps runtime state in memory.
@@ -50,7 +57,8 @@ or state files; the sidebar keeps runtime state in memory.
 
 ```text
 .
-├── agents.tmux        # TPM entry script; builds/binds/hooks the binary
+├── .github/workflows/ # Release build automation
+├── agents.tmux        # TPM entry script; downloads/binds/hooks the binary
 ├── Cargo.toml         # Rust crate manifest and lint settings
 ├── Cargo.lock         # Locked Rust dependencies
 ├── README.md          # User and developer documentation
@@ -69,7 +77,7 @@ or state files; the sidebar keeps runtime state in memory.
 
 ```sh
 cargo build              # debug build
-cargo build --release    # production binary used by agents.tmux
+cargo build --release    # production binary for local fallback builds
 cargo test               # unit tests
 cargo fmt --check        # formatting check
 cargo clippy --all-targets
@@ -81,6 +89,32 @@ Inside tmux, run the binary directly for local testing:
 cargo run -- toggle      # create/collapse/expand/close the sidebar
 cargo run                # run the sidebar TUI in the current pane
 cargo run -- follow      # move the sidebar to the active window
+```
+
+## Release
+
+Releases are tag-driven. A `v*` tag builds tarballs and SHA-256 files for:
+
+- `aarch64-apple-darwin`
+- `x86_64-apple-darwin`
+- `aarch64-unknown-linux-gnu`
+- `x86_64-unknown-linux-gnu`
+
+To cut a release, bump the default `version` in `agents.tmux` to the new tag
+in the same commit, then:
+
+```sh
+cargo fmt --check
+cargo test
+cargo clippy --all-targets
+git tag v0.1.0
+git push origin main v0.1.0
+```
+
+`agents.tmux` downloads `v0.1.0` by default. For testing another release:
+
+```tmux
+set -g @agents-version 'v0.1.1'
 ```
 
 ## How it works
@@ -118,3 +152,7 @@ message → `blocked`:
 ```
 grep -qi permission && tmux set -p -t "$TMUX_PANE" @agent_state blocked 2>/dev/null; exit 0
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE).

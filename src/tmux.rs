@@ -75,12 +75,6 @@ pub fn jump(pane: &Pane) -> io::Result<()> {
     Ok(())
 }
 
-pub fn resize_self(width: u16) -> io::Result<()> {
-    let pane = std::env::var("TMUX_PANE").map_err(io::Error::other)?;
-    tmux(&["resize-pane", "-t", &pane, "-x", &width.to_string()])?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

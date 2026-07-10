@@ -12,17 +12,19 @@ Needs a Rust toolchain on first run (builds the binary). tmux ≥ 3.0.
 
 ## Usage
 
-`prefix a` toggles the sidebar.
+`prefix a` toggles the sidebar. In the default `collapsed` mode it shrinks
+to an icon-only strip instead of closing; set `@agents-toggle 'hidden'` to
+close it entirely.
 
 | key     | action               |
 | ------- | -------------------- |
 | `j`/`k` | move selection       |
 | `Enter` | jump to agent's pane |
-| `Tab`   | collapse/expand      |
 | `q`     | close                |
 
 ## Options
 
+    set -g @agents-toggle 'collapsed'     # collapsed | hidden
     set -g @agents-position 'right'       # left | right
     set -g @agents-width '32'             # integer columns (no %)
     set -g @agents-collapsed-width '6'    # integer columns, keep < 12

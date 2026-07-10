@@ -3,17 +3,29 @@ use std::io;
 use crate::tmux::{option, tmux};
 
 pub fn toggle() -> io::Result<()> {
-    // All panes, any session/window, with sidebar marker.
-    let out = tmux(&["list-panes", "-a", "-F", "#{pane_id}\t#{@agents_sidebar}"])?;
-    if let Some(id) = out.lines().find_map(|l| {
-        let (id, mark) = l.split_once('\t')?;
-        (mark == "1").then(|| id.to_string())
+    // All panes, any session/window, with sidebar marker and current width.
+    let out = tmux(&[
+        "list-panes",
+        "-a",
+        "-F",
+        "#{pane_id}\t#{pane_width}\t#{@agents_sidebar}",
+    ])?;
+    let width = option("@agents-width", "32");
+    if let Some((id, cur)) = out.lines().find_map(|l| {
+        let mut f = l.split('\t');
+        let (id, cur, mark) = (f.next()?, f.next()?, f.next()?);
+        (mark == "1").then(|| (id.to_string(), cur.to_string()))
     }) {
-        tmux(&["kill-pane", "-t", &id])?;
+        if option("@agents-toggle", "collapsed") == "hidden" {
+            tmux(&["kill-pane", "-t", &id])?;
+        } else {
+            let collapsed = option("@agents-collapsed-width", "6");
+            let target = if cur == collapsed { &width } else { &collapsed };
+            tmux(&["resize-pane", "-t", &id, "-x", target])?;
+        }
         return Ok(());
     }
 
-    let width = option("@agents-width", "32");
     let exe = std::env::current_exe()?;
     let exe = exe
         .to_str()

@@ -240,30 +240,20 @@ fn render_collapsed(frame: &mut Frame, agents: &[Agent], area: Rect, spin: usize
 pub fn run() -> io::Result<()> {
     let interval: u64 = tmux::option("@agents-interval", "1").parse().unwrap_or(1);
     let interval = Duration::from_secs(interval.max(1));
-    let width: u16 = tmux::option("@agents-width", "32").parse().unwrap_or(32);
-    let collapsed_width: u16 = tmux::option("@agents-collapsed-width", "6")
-        .parse()
-        .unwrap_or(6);
 
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, interval, width, collapsed_width);
+    let result = event_loop(&mut terminal, interval);
     ratatui::restore();
     result
 }
 
-fn event_loop(
-    terminal: &mut ratatui::DefaultTerminal,
-    interval: Duration,
-    width: u16,
-    collapsed_width: u16,
-) -> io::Result<()> {
+fn event_loop(terminal: &mut ratatui::DefaultTerminal, interval: Duration) -> io::Result<()> {
     let mut prev_states = HashMap::new();
     let mut prev_raw = HashMap::new();
     let mut agents = refresh(&prev_states, &prev_raw)?;
     let mut rows = build_rows(&agents);
     let mut list_state = ListState::default();
     let mut last_tick = Instant::now();
-    let mut expanded = true;
     let start = Instant::now();
 
     loop {
@@ -301,10 +291,6 @@ fn event_loop(
                         {
                             let _ = tmux::jump(&agents[*i].pane);
                         }
-                    }
-                    KeyCode::Tab => {
-                        expanded = !expanded;
-                        let _ = tmux::resize_self(if expanded { width } else { collapsed_width });
                     }
                     _ => {}
                 },

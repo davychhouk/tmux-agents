@@ -158,10 +158,17 @@ fn state_style(state: AgentState, spin: usize) -> (char, Style) {
     }
 }
 
-fn render(frame: &mut Frame, agents: &[Agent], rows: &[Row], list_state: &mut ListState, spin: usize) {
+fn render(
+    frame: &mut Frame,
+    agents: &[Agent],
+    rows: &[Row],
+    list_state: &mut ListState,
+    spin: usize,
+    focused: bool,
+) {
     let area = frame.area();
     if area.width < COLLAPSE_THRESHOLD {
-        render_collapsed(frame, agents, area, spin);
+        render_collapsed(frame, agents, rows, list_state, area, spin, focused);
         return;
     }
     let [title_area, list_area, hints_area] = Layout::vertical([
@@ -185,7 +192,7 @@ fn render(frame: &mut Frame, agents: &[Agent], rows: &[Row], list_state: &mut Li
         hints_area,
     );
     let mut first_header = true;
-    let selected = list_state.selected();
+    let selected = if focused { list_state.selected() } else { None };
     let items: Vec<ListItem> = rows
         .iter()
         .enumerate()
@@ -249,7 +256,7 @@ fn render(frame: &mut Frame, agents: &[Agent], rows: &[Row], list_state: &mut Li
     let list_area = center_vertically(list_area, heights.iter().sum());
     let list = List::new(items);
     frame.render_stateful_widget(list, list_area, list_state);
-    if let Some(sel) = list_state.selected() {
+    if let Some(sel) = selected {
         let offset = list_state.offset().min(sel);
         let y: usize = heights[offset..sel].iter().sum();
         frame.set_cursor_position((list_area.x, list_area.y + y as u16));
@@ -265,16 +272,39 @@ fn center_vertically(area: Rect, content_height: usize) -> Rect {
     centered
 }
 
-fn render_collapsed(frame: &mut Frame, agents: &[Agent], area: Rect, spin: usize) {
+fn render_collapsed(
+    frame: &mut Frame,
+    agents: &[Agent],
+    rows: &[Row],
+    list_state: &ListState,
+    area: Rect,
+    spin: usize,
+    focused: bool,
+) {
+    // Selection lives in row-space (headers + agents); icons are agent-space.
+    let selected = if focused { list_state.selected() } else { None };
+    let selected_agent = selected.and_then(|s| match rows.get(s) {
+        Some(Row::Agent(i)) => Some(*i),
+        _ => None,
+    });
     let items: Vec<ListItem> = agents
         .iter()
-        .map(|a| {
+        .enumerate()
+        .map(|(i, a)| {
             let (icon, style) = state_style(a.state, spin);
-            ListItem::new(Line::from(Span::styled(format!(" {icon}"), style)))
+            let item = ListItem::new(Line::from(Span::styled(format!(" {icon}"), style)));
+            if selected_agent == Some(i) {
+                item.style(Style::default().bg(SELECTED_BG))
+            } else {
+                item
+            }
         })
         .collect();
     let area = center_vertically(area, items.len());
     frame.render_widget(List::new(items), area);
+    if let Some(i) = selected_agent {
+        frame.set_cursor_position((area.x, area.y + i as u16));
+    }
 }
 
 pub fn run() -> io::Result<()> {
@@ -297,10 +327,13 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, interval: Duration) -> io
     let mut list_state = ListState::default();
     let mut last_tick = Instant::now();
     let start = Instant::now();
+    // tmux replays the pane's focus state when focus reporting is enabled,
+    // so this corrects itself immediately if we spawn focused.
+    let mut focused = false;
 
     loop {
         let spin = (start.elapsed().as_millis() / 100) as usize;
-        terminal.draw(|f| render(f, &agents, &rows, &mut list_state, spin))?;
+        terminal.draw(|f| render(f, &agents, &rows, &mut list_state, spin, focused))?;
 
         let pending_confirmation = agents
             .iter()
@@ -339,6 +372,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, interval: Duration) -> io
                 // Land the selection on this window's agent when the user
                 // focuses the sidebar.
                 Event::FocusGained => {
+                    focused = true;
                     if let Ok((session, window)) = tmux::own_window() {
                         if let Some(a) = agents.iter().find(|a| {
                             a.pane.session == session && a.pane.window_index == window
@@ -347,6 +381,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, interval: Duration) -> io
                         }
                     }
                 }
+                Event::FocusLost => focused = false,
                 _ => {}
             }
         }

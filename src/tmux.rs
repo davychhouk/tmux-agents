@@ -66,6 +66,26 @@ pub fn option(name: &str, default: &str) -> String {
     }
 }
 
+/// Session and window index the sidebar itself lives in.
+pub fn own_window() -> io::Result<(String, u32)> {
+    let pane = std::env::var("TMUX_PANE").map_err(io::Error::other)?;
+    let out = tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        &pane,
+        "#{session_name}\t#{window_index}",
+    ])?;
+    let out = out.trim();
+    let (session, window) = out
+        .split_once('\t')
+        .ok_or_else(|| io::Error::other("bad display-message output"))?;
+    Ok((
+        session.to_string(),
+        window.parse().map_err(io::Error::other)?,
+    ))
+}
+
 pub fn jump(pane: &Pane) -> io::Result<()> {
     tmux(&["switch-client", "-t", &pane.session])?;
     tmux(&[

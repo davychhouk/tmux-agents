@@ -3,7 +3,10 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, DisableFocusChange, EnableFocusChange, Event, KeyCode, KeyEventKind, KeyModifiers,
+};
+use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -279,7 +282,9 @@ pub fn run() -> io::Result<()> {
     let interval = Duration::from_secs(interval.max(1));
 
     let mut terminal = ratatui::init();
+    let _ = execute!(io::stdout(), EnableFocusChange);
     let result = event_loop(&mut terminal, interval);
+    let _ = execute!(io::stdout(), DisableFocusChange);
     ratatui::restore();
     result
 }
@@ -331,6 +336,17 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, interval: Duration) -> io
                     }
                     _ => {}
                 },
+                // Land the selection on this window's agent when the user
+                // focuses the sidebar.
+                Event::FocusGained => {
+                    if let Ok((session, window)) = tmux::own_window() {
+                        if let Some(a) = agents.iter().find(|a| {
+                            a.pane.session == session && a.pane.window_index == window
+                        }) {
+                            list_state.select(row_for_pane(&rows, &agents, &a.pane.id));
+                        }
+                    }
+                }
                 _ => {}
             }
         }

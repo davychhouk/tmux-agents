@@ -26,7 +26,7 @@ const INTERRUPT: &str = "to interrupt";
 /// Claude's spinner cycle. Its glyph also leads the finished-task summary
 /// ("✻ Cooked for 2m 0s"), so a glyph alone means nothing — the trailing
 /// ellipsis of an in-progress gerund ("✻ Bloviating…") is what says working.
-const CLAUDE_GLYPHS: &[char] = &['·', '✢', '✳', '✶', '✻', '✽'];
+pub(crate) const CLAUDE_GLYPHS: &[char] = &['·', '✢', '✳', '✶', '✻', '✽'];
 
 /// Leading marks on the selected entry of a confirmation dialog.
 const CARETS: &[char] = &['❯', '›', '>', '▶', '▸'];

@@ -12,7 +12,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState};
 
-use crate::classify::{AgentState, classify, classify_pane, hook_state, is_transcript_view};
+use crate::classify::{
+    AgentState, CLAUDE_GLYPHS, classify, classify_pane, hook_state, is_transcript_view,
+};
 use crate::detect::{AgentKind, find_agent, ps_snapshot};
 use crate::tmux;
 
@@ -159,6 +161,17 @@ fn next_agent_row(rows: &[Row], from: Option<usize>, dir: i32) -> Option<usize> 
     agent_rows.get(next).copied()
 }
 
+/// Pane title minus agent status prefixes: spinner frames and claude's
+/// glyph cycle lead the OSC title while a turn runs, and the state column
+/// already shows that.
+fn clean_title(title: &str) -> &str {
+    title
+        .trim_start_matches(|c: char| {
+            matches!(c, '\u{2800}'..='\u{28FF}') || CLAUDE_GLYPHS.contains(&c) || c.is_whitespace()
+        })
+        .trim_end()
+}
+
 fn row_for_pane(rows: &[Row], agents: &[Agent], pane_id: &str) -> Option<usize> {
     rows.iter()
         .position(|r| matches!(r, Row::Agent(i) if agents[*i].pane.id == pane_id))
@@ -260,8 +273,9 @@ fn render(
                     (Style::default(), Style::default().fg(Color::DarkGray))
                 };
                 let mut top = format!(" {}:{}", a.pane.window_index, a.pane.window_name);
-                if !a.pane.title.is_empty() {
-                    top.push_str(&format!(" · {}", a.pane.title));
+                let title = clean_title(&a.pane.title);
+                if !title.is_empty() {
+                    top.push_str(&format!(" · {title}"));
                 }
                 let item = ListItem::new(vec![
                     Line::from(vec![
@@ -444,6 +458,14 @@ mod tests {
     use crate::classify::AgentState;
     use crate::detect::AgentKind;
     use crate::tmux::Pane;
+
+    #[test]
+    fn clean_title_strips_status_glyph_prefixes() {
+        assert_eq!(clean_title("⠐ tmux-agents"), "tmux-agents");
+        assert_eq!(clean_title("✳ my-project"), "my-project");
+        assert_eq!(clean_title("v ~/p/macdots"), "v ~/p/macdots");
+        assert_eq!(clean_title("  "), "");
+    }
 
     fn agent(session: &str, window: u32) -> Agent {
         Agent {

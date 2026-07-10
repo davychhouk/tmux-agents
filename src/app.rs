@@ -195,7 +195,7 @@ fn state_style(state: AgentState, spin: usize) -> (char, Style) {
             Style::default().fg(Color::Yellow),
         ),
         AgentState::Blocked => (
-            '!',
+            '?',
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
         AgentState::Idle => ('○', Style::default().fg(Color::DarkGray)),

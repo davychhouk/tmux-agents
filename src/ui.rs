@@ -194,6 +194,67 @@ fn render_collapsed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::tests::agent;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    /// Render into a `width`-wide buffer; return (y, line text) of each
+    /// highlighted row, plus y of every row showing the idle icon.
+    fn render_rows(
+        width: u16,
+        rows: &[Row],
+        selected: usize,
+        focused: bool,
+    ) -> (Vec<(u16, String)>, Vec<u16>) {
+        let agents = vec![agent("a", 1), agent("b", 2)];
+        let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
+        let mut state = ListState::default().with_selected(Some(selected));
+        terminal
+            .draw(|f| render(f, &agents, rows, &mut state, 0, focused))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let line = |y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>();
+        let highlighted = (0..20)
+            .filter(|&y| (0..width).any(|x| buf[(x, y)].bg == SELECTED_BG))
+            .map(|y| (y, line(y)))
+            .collect();
+        let icons = (0..20).filter(|&y| line(y).contains('○')).collect();
+        (highlighted, icons)
+    }
+
+    fn rows() -> Vec<Row> {
+        vec![
+            Row::Header("a".into()),
+            Row::Agent(0),
+            Row::Header("b".into()),
+            Row::Agent(1),
+        ]
+    }
+
+    #[test]
+    fn selection_highlighted_only_while_focused() {
+        let (hl, _) = render_rows(40, &rows(), 3, false);
+        assert_eq!(hl, []);
+        let (hl, _) = render_rows(40, &rows(), 3, true);
+        // Agent rows are two lines tall; both carry the highlight.
+        assert_eq!(hl.len(), 2);
+        assert!(hl[0].1.contains("2:w2"));
+    }
+
+    #[test]
+    fn collapsed_maps_selected_row_to_agent_icon() {
+        let (hl, icons) = render_rows(2, &rows(), 3, true);
+        assert_eq!(icons.len(), 2);
+        assert_eq!(hl.iter().map(|h| h.0).collect::<Vec<_>>(), [icons[1]]);
+        let (hl, _) = render_rows(2, &rows(), 3, false);
+        assert_eq!(hl, []);
+    }
+
+    #[test]
+    fn collapsed_header_selection_highlights_nothing() {
+        let (hl, _) = render_rows(2, &rows(), 2, true);
+        assert_eq!(hl, []);
+    }
 
     #[test]
     fn clean_title_strips_status_glyph_prefixes() {

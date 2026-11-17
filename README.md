@@ -27,7 +27,7 @@ close it entirely.
 | key     | action               |
 | ------- | -------------------- |
 | `j`/`k` | move selection       |
-| `Enter` | jump to agent's pane |
+| `Enter` | jump to agent's pane and collapse (or close) the sidebar |
 | `q`     | close                |
 
 ## Options

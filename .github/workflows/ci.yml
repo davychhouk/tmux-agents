@@ -18,6 +18,18 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked
 
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup component add llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - run: |
+          cargo llvm-cov --locked --summary-only | tee coverage.txt
+          { echo '```'; grep -E '^(Filename|-|[a-z]+\.rs|TOTAL)' coverage.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
   test:
     strategy:
       fail-fast: false

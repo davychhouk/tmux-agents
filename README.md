@@ -18,17 +18,47 @@ Rust toolchain.
 
 Prebuilt binaries are published for macOS and Linux on x86_64 and arm64.
 
+## Features
+
+- **Agent detection**: finds claude and codex in any tmux session or window,
+  including agents started through `node`/`bun`/shell wrappers or inside nvim
+  terminals.
+- **Live status**: each agent shows as working (animated spinner), blocked
+  (`?`, waiting on you), done (`✓`, finished a task), or idle (`○`).
+- **Accurate state detection**: uses the agent's own hooks when set up, then
+  its terminal title, then what's on screen. Short idle blips while working
+  are smoothed out so nothing flashes "done" mid-task.
+- **Grouped by session**: agents listed under their tmux session, with window
+  name and pane title.
+- **Jump to agent**: `Enter` switches to the agent's session, window and pane,
+  then collapses (or closes) the sidebar.
+- **Collapsible**: toggle between the full list and a narrow icon-only strip,
+  or close it entirely with `hidden` mode.
+- **Follows you**: the sidebar moves with you when you switch windows or
+  sessions, keeping its width.
+- **Focus-aware selection**: when you focus the sidebar, the selection lands
+  on the current window's agent (if any); the highlight only shows while
+  focused.
+- **Left or right**: dock on either side, with configurable widths.
+- **Lightweight**: one binary, no daemon or state files. Polls on an interval
+  and only animates while an agent is working.
+- **Easy install**: TPM downloads a checksummed prebuilt binary, or builds
+  from source if no binary is available.
+
 ## Usage
 
-`prefix a` toggles the sidebar. In the default `collapsed` mode it shrinks
-to an icon-only strip instead of closing; set `@agents-toggle 'hidden'` to
-close it entirely.
+`prefix a` opens the sidebar, then switches it between expanded and
+collapsed. In the default `collapsed` mode it shrinks to an icon-only strip
+instead of closing; set `@agents-toggle 'hidden'` to close it entirely.
 
-| key     | action               |
-| ------- | -------------------- |
-| `j`/`k` | move selection       |
-| `Enter` | jump to agent's pane and collapse (or close) the sidebar |
-| `q`     | close                |
+Focus the sidebar pane (e.g. `prefix` + arrow) to use the keys below. The
+selection starts on the current window's agent, if it has one.
+
+| key              | action                                                 |
+| ---------------- | ------------------------------------------------------ |
+| `j`/`k`, `↓`/`↑` | move selection                                         |
+| `Enter`          | jump to agent's pane, then collapse (or close) sidebar |
+| `q`, `Ctrl-C`    | quit the sidebar                                       |
 
 ## Options
 
@@ -38,7 +68,8 @@ close it entirely.
     set -g @agents-position 'right'       # left | right
     set -g @agents-width '32'             # integer columns (no %)
     set -g @agents-collapsed-width '2'    # default: 3 on left, 2 on right; keep < 12
-    set -g @agents-interval '1'           # poll seconds
+    set -g @agents-interval '1'           # poll seconds (min 1)
+    set -g @agents-version 'v0.2.0'       # release binary to download
 
 Widths are integer column counts; percentages are not supported. The sidebar
 renders icon-only below 12 columns, so keep the collapsed width under 12.
@@ -50,7 +81,7 @@ renders icon-only below 12 columns, so keep the collapsed width under 12.
 - tmux commands for pane management, capture, options, hooks, and navigation
 - `ps` process snapshots for claude/codex process-tree detection
 - Bash TPM entry script (`agents.tmux`)
-- GitHub Actions release builds for prebuilt binaries
+- GitHub Actions for PR checks and release builds
 
 The project is a single binary. It has no daemon, socket, IPC layer, database,
 or state files; the sidebar keeps runtime state in memory.
@@ -59,7 +90,7 @@ or state files; the sidebar keeps runtime state in memory.
 
 ```text
 .
-├── .github/workflows/ # Release build automation
+├── .github/workflows/ # CI (ci.yml) and release builds (release.yml)
 ├── agents.tmux        # TPM entry script; downloads/binds/hooks the binary
 ├── Cargo.toml         # Rust crate manifest and lint settings
 ├── Cargo.lock         # Locked Rust dependencies
@@ -85,6 +116,11 @@ cargo fmt --check        # formatting check
 cargo clippy --all-targets
 ```
 
+CI runs `cargo fmt --check` and `cargo clippy --all-targets` on every pull
+request, plus `cargo test` and `cargo build --release` on Linux and macOS,
+and a coverage report (see [Coverage](#coverage)). Warnings fail the build
+(`RUSTFLAGS=-D warnings`).
+
 Inside tmux, run the binary directly for local testing:
 
 ```sh
@@ -92,6 +128,60 @@ cargo run -- toggle      # create/collapse/expand/close the sidebar
 cargo run                # run the sidebar TUI in the current pane
 cargo run -- follow      # move the sidebar to the active window
 ```
+
+## Tests
+
+Unit tests live next to the code they test (`#[cfg(test)]` modules) and run
+with `cargo test`. They need no tmux server, so they run anywhere, including
+CI on Linux and macOS.
+
+| module        | tests | covers                                                                                                                                        |
+| ------------- | ----: | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `classify.rs` |    36 | working/blocked/idle from screen text, titles and hook state; dialogs, side-by-side splits, transcript view, false positives from quoted text |
+| `detect.rs`   |    11 | finding claude/codex in process trees (direct, nested in nvim, via interpreters), `ps` parsing                                                |
+| `app.rs`      |     7 | done debounce, session grouping, j/k selection skipping headers, selection kept across refreshes                                              |
+| `toggle.rs`   |     4 | finding the sidebar pane, collapse/expand width, default collapsed width per side                                                             |
+| `ui.rs`       |     4 | highlight only while focused, collapsed-mode selection, title cleanup                                                                         |
+| `tmux.rs`     |     2 | parsing `list-panes` output                                                                                                                   |
+
+Not covered by automated tests: the tmux commands themselves (spawning,
+resizing, moving and jumping panes), focus events, and key handling in the
+event loop. Check those by hand in tmux, ideally on a separate server
+(`tmux -L test`) so your own session is untouched.
+
+### Coverage
+
+Measured with [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov). CI
+runs it on every pull request and posts the per-file table in the job
+summary.
+
+```sh
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov
+cargo llvm-cov --summary-only            # per-file table
+cargo llvm-cov --open                    # HTML report with uncovered lines
+```
+
+Without rustup (e.g. a Nix toolchain), point it at a matching LLVM:
+`nix shell nixpkgs#cargo-llvm-cov nixpkgs#rustc.llvm`, then set `LLVM_COV`
+and `LLVM_PROFDATA` to the `llvm-cov` and `llvm-profdata` on `PATH`.
+
+As of v0.2.0:
+
+| file          | lines  | functions |
+| ------------- | -----: | --------: |
+| `classify.rs` |  99.0% |    100.0% |
+| `ui.rs`       |  94.7% |    100.0% |
+| `detect.rs`   |  91.1% |     96.0% |
+| `app.rs`      |  48.6% |     54.6% |
+| `toggle.rs`   |  37.3% |     56.3% |
+| `tmux.rs`     |  34.6% |     30.8% |
+| `main.rs`     |   0.0% |      0.0% |
+| **total**     |  71.8% |     80.4% |
+
+The pure logic (state detection, process detection, rendering) is nearly
+fully covered. The low numbers are the tmux side: the event loop, tmux
+commands, and CLI dispatch.
 
 ## Release
 
@@ -102,29 +192,31 @@ Releases are tag-driven. A `v*` tag builds tarballs and SHA-256 files for:
 - `aarch64-unknown-linux-gnu`
 - `x86_64-unknown-linux-gnu`
 
-To cut a release, bump the default `version` in `agents.tmux` to the new tag
-in the same commit, then:
+To cut a release, bump `version` in `Cargo.toml` and the default `version` in
+`agents.tmux` to the new tag in the same commit, then:
 
 ```sh
 cargo fmt --check
 cargo test
 cargo clippy --all-targets
-git tag v0.2.0
-git push origin main v0.2.0
+git tag -a vX.Y.Z -m vX.Y.Z
+git push origin main vX.Y.Z
 ```
 
-`agents.tmux` downloads `v0.2.0` by default. For testing another release:
+`agents.tmux` downloads `v0.2.0` by default. To test another release:
 
 ```tmux
-set -g @agents-version 'v0.1.1'
+set -g @agents-version 'v0.1.0'
 ```
 
 ## How it works
 
 Polls `tmux list-panes -a`, walks each pane's process tree for claude/codex
-(including inside nvim terminals), and classifies each pane into
+(including inside nvim terminals), falls back to spotting codex's
+"OpenAI Codex" banner on screen, and classifies each pane into
 working / blocked / idle. An agent that goes from working to idle shows as
-done (green) until it starts working again.
+done (green) until it starts working again. The switch to done waits for a
+second idle reading, so a brief pause mid-task doesn't flash done.
 
 Per pane, signals are consulted in order:
 
@@ -134,7 +226,9 @@ Per pane, signals are consulted in order:
 2. **Pane title (OSC)** — a leading braille spinner frame means working;
    codex titles a pending approval "Action Required".
 3. **Screen scraping** — `capture-pane` tail matched against live UI shapes
-   (spinners, interrupt hints, dialog choices/footers).
+   (spinners, interrupt hints, dialog choices/footers). Side-by-side splits
+   (e.g. an agent in an nvim split) are read as separate regions, and claude's
+   `ctrl+o` transcript view keeps the last known state.
 
 ### Hook integration (optional, most accurate)
 

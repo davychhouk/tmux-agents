@@ -81,18 +81,35 @@ pub fn follow() -> io::Result<()> {
     Ok(())
 }
 
+fn is_hidden_mode() -> bool {
+    option("@agents-toggle", "collapsed") == "hidden"
+}
+
+fn collapsed_width() -> String {
+    option(
+        "@agents-collapsed-width",
+        default_collapsed_width(is_left()),
+    )
+}
+
+/// Collapse the sidebar (or kill it in hidden mode); never expands.
+pub fn close(pane_id: &str) -> io::Result<()> {
+    if is_hidden_mode() {
+        tmux(&["kill-pane", "-t", pane_id])?;
+    } else {
+        tmux(&["resize-pane", "-t", pane_id, "-x", &collapsed_width()])?;
+    }
+    Ok(())
+}
+
 pub fn toggle() -> io::Result<()> {
     let width = option("@agents-width", "32");
     if let Some(sb) = find_sidebar(&tmux(&["list-panes", "-a", "-F", SIDEBAR_FORMAT])?) {
-        if option("@agents-toggle", "collapsed") == "hidden" {
+        if is_hidden_mode() {
             tmux(&["kill-pane", "-t", &sb.id])?;
         } else {
-            let collapsed = option(
-                "@agents-collapsed-width",
-                default_collapsed_width(is_left()),
-            );
-            let target = toggled_width(&sb.width, &collapsed, &width);
-            tmux(&["resize-pane", "-t", &sb.id, "-x", target])?;
+            let target = toggled_width(&sb.width, &collapsed_width(), &width).to_string();
+            tmux(&["resize-pane", "-t", &sb.id, "-x", &target])?;
         }
         return Ok(());
     }

@@ -10,7 +10,7 @@ use ratatui::widgets::ListState;
 
 use crate::classify::{AgentState, resolve_state};
 use crate::detect::{AgentKind, find_agent, ps_snapshot};
-use crate::{tmux, ui};
+use crate::{tmux, toggle, ui};
 
 /// Cap on how long the Working→Done debounce (see `next_state`) can lag a
 /// slow user-configured `@agents-interval` — an agent awaiting its second
@@ -213,8 +213,10 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, interval: Duration) -> io
                     }
                     KeyCode::Enter => {
                         if let Some(Row::Agent(i)) = list_state.selected().and_then(|s| rows.get(s))
+                            && tmux::jump(&agents[*i].pane).is_ok()
+                            && let Ok(own) = std::env::var("TMUX_PANE")
                         {
-                            let _ = tmux::jump(&agents[*i].pane);
+                            let _ = toggle::close(&own);
                         }
                     }
                     _ => {}

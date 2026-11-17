@@ -141,6 +141,16 @@ fn row_for_pane(rows: &[Row], agents: &[Agent], pane_id: &str) -> Option<usize> 
         .position(|r| matches!(r, Row::Agent(i) if agents[*i].pane.id == pane_id))
 }
 
+fn select_own_window(rows: &[Row], agents: &[Agent], list_state: &mut ListState) {
+    if let Ok((session, window)) = tmux::own_window()
+        && let Some(a) = agents
+            .iter()
+            .find(|a| a.pane.session == session && a.pane.window_index == window)
+    {
+        list_state.select(row_for_pane(rows, agents, &a.pane.id));
+    }
+}
+
 pub fn run() -> io::Result<()> {
     let interval: u64 = tmux::option("@agents-interval", "1").parse().unwrap_or(1);
     let interval = Duration::from_secs(interval.max(1));
@@ -161,9 +171,12 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, interval: Duration) -> io
     let mut list_state = ListState::default();
     let mut last_tick = Instant::now();
     let start = Instant::now();
-    // tmux replays the pane's focus state when focus reporting is enabled,
-    // so this corrects itself immediately if we spawn focused.
-    let mut focused = false;
+    // tmux doesn't send focus-in for a pane that spawns active (toggle's
+    // split-window), so seed from tmux's own state.
+    let mut focused = tmux::own_pane_active();
+    if focused {
+        select_own_window(&rows, &agents, &mut list_state);
+    }
 
     loop {
         let spin = (start.elapsed().as_millis() / 100) as usize;
@@ -210,13 +223,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, interval: Duration) -> io
                 // focuses the sidebar.
                 Event::FocusGained => {
                     focused = true;
-                    if let Ok((session, window)) = tmux::own_window()
-                        && let Some(a) = agents
-                            .iter()
-                            .find(|a| a.pane.session == session && a.pane.window_index == window)
-                    {
-                        list_state.select(row_for_pane(&rows, &agents, &a.pane.id));
-                    }
+                    select_own_window(&rows, &agents, &mut list_state);
                 }
                 Event::FocusLost => focused = false,
                 _ => {}

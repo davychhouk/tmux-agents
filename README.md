@@ -37,7 +37,8 @@ Prebuilt binaries are published for macOS and Linux on x86_64 and arm64.
 - **Follows you**: the sidebar moves with you when you switch windows or
   sessions, keeping its width.
 - **Focus-aware selection**: when you focus the sidebar, the selection lands
-  on the current window's agent; the highlight only shows while focused.
+  on the current window's agent (if any); the highlight only shows while
+  focused.
 - **Left or right**: dock on either side, with configurable widths.
 - **Lightweight**: one binary, no daemon or state files. Polls on an interval
   and only animates while an agent is working.
@@ -51,7 +52,7 @@ collapsed. In the default `collapsed` mode it shrinks to an icon-only strip
 instead of closing; set `@agents-toggle 'hidden'` to close it entirely.
 
 Focus the sidebar pane (e.g. `prefix` + arrow) to use the keys below. The
-selection starts on the current window's agent.
+selection starts on the current window's agent, if it has one.
 
 | key              | action                                                 |
 | ---------------- | ------------------------------------------------------ |
@@ -116,8 +117,9 @@ cargo clippy --all-targets
 ```
 
 CI runs `cargo fmt --check` and `cargo clippy --all-targets` on every pull
-request, plus `cargo test` and `cargo build --release` on Linux and macOS.
-Warnings fail the build (`RUSTFLAGS=-D warnings`).
+request, plus `cargo test` and `cargo build --release` on Linux and macOS,
+and a coverage report (see [Coverage](#coverage)). Warnings fail the build
+(`RUSTFLAGS=-D warnings`).
 
 Inside tmux, run the binary directly for local testing:
 
@@ -197,8 +199,8 @@ To cut a release, bump `version` in `Cargo.toml` and the default `version` in
 cargo fmt --check
 cargo test
 cargo clippy --all-targets
-git tag -a v0.2.0 -m v0.2.0
-git push origin main v0.2.0
+git tag -a vX.Y.Z -m vX.Y.Z
+git push origin main vX.Y.Z
 ```
 
 `agents.tmux` downloads `v0.2.0` by default. To test another release:
@@ -210,7 +212,8 @@ set -g @agents-version 'v0.1.0'
 ## How it works
 
 Polls `tmux list-panes -a`, walks each pane's process tree for claude/codex
-(including inside nvim terminals), and classifies each pane into
+(including inside nvim terminals), falls back to spotting codex's
+"OpenAI Codex" banner on screen, and classifies each pane into
 working / blocked / idle. An agent that goes from working to idle shows as
 done (green) until it starts working again. The switch to done waits for a
 second idle reading, so a brief pause mid-task doesn't flash done.

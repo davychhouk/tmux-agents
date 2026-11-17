@@ -79,6 +79,21 @@ pub fn option(name: &str, default: &str) -> String {
     }
 }
 
+/// Whether the sidebar is the active pane of the active window.
+pub fn own_pane_active() -> bool {
+    let Ok(pane) = std::env::var("TMUX_PANE") else {
+        return false;
+    };
+    tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        &pane,
+        "#{?pane_active,#{window_active},0}",
+    ])
+    .is_ok_and(|s| s.trim() == "1")
+}
+
 /// Session and window index the sidebar itself lives in.
 pub fn own_window() -> io::Result<(String, u32)> {
     let pane = std::env::var("TMUX_PANE").map_err(io::Error::other)?;

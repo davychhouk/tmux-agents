@@ -2,6 +2,49 @@ use std::io;
 
 use crate::tmux::{option, tmux};
 
+#[derive(Debug, PartialEq, Eq)]
+struct Sidebar {
+    id: String,
+    width: String,
+    /// `session:window` the sidebar currently lives in.
+    at: String,
+}
+
+const SIDEBAR_FORMAT: &str =
+    "#{pane_id}\t#{pane_width}\t#{session_name}:#{window_index}\t#{@agents_sidebar}";
+
+/// The pane marked `@agents_sidebar` in `list-panes -a -F SIDEBAR_FORMAT`.
+fn find_sidebar(out: &str) -> Option<Sidebar> {
+    out.lines().find_map(|l| {
+        let mut f = l.split('\t');
+        let (id, width, at, mark) = (f.next()?, f.next()?, f.next()?, f.next()?);
+        (mark == "1").then(|| Sidebar {
+            id: id.into(),
+            width: width.into(),
+            at: at.into(),
+        })
+    })
+}
+
+/// Left needs a spare column: the pane border sits on the right, so a
+/// 2-wide strip would butt icons against the content.
+fn default_collapsed_width(left: bool) -> &'static str {
+    if left { "3" } else { "2" }
+}
+
+/// Width to resize to: expand when collapsed, collapse otherwise.
+fn toggled_width<'a>(cur: &str, collapsed: &'a str, expanded: &'a str) -> &'a str {
+    if cur == collapsed {
+        expanded
+    } else {
+        collapsed
+    }
+}
+
+fn is_left() -> bool {
+    option("@agents-position", "right") == "left"
+}
+
 /// Move the sidebar into the now-active window, keeping its width (and so
 /// its expanded/collapsed state). Run from tmux hooks on window/session
 /// switches; a no-op when there's no sidebar or it's already there.
@@ -9,23 +52,13 @@ pub fn follow() -> io::Result<()> {
     if option("@agents-follow", "on") == "off" {
         return Ok(());
     }
-    let out = tmux(&[
-        "list-panes",
-        "-a",
-        "-F",
-        "#{pane_id}\t#{pane_width}\t#{session_name}:#{window_index}\t#{@agents_sidebar}",
-    ])?;
-    let Some((id, width, at)) = out.lines().find_map(|l| {
-        let mut f = l.split('\t');
-        let (id, w, at, mark) = (f.next()?, f.next()?, f.next()?, f.next()?);
-        (mark == "1").then(|| (id.to_string(), w.to_string(), at.to_string()))
-    }) else {
+    let Some(sb) = find_sidebar(&tmux(&["list-panes", "-a", "-F", SIDEBAR_FORMAT])?) else {
         return Ok(());
     };
     // Hook context resolves to the client/session that triggered it.
     let target = tmux(&["display-message", "-p", "#{session_name}:#{window_index}"])?;
     let target = target.trim();
-    if target == at {
+    if target == sb.at {
         return Ok(());
     }
     let mut args = vec![
@@ -34,13 +67,13 @@ pub fn follow() -> io::Result<()> {
         "-h",
         "-f",
         "-l",
-        &width,
+        &sb.width,
         "-s",
-        &id,
+        &sb.id,
         "-t",
         target,
     ];
-    if option("@agents-position", "right") == "left" {
+    if is_left() {
         args.push("-b");
     }
     // Best-effort: racing with jump()'s own move is fine.
@@ -49,32 +82,17 @@ pub fn follow() -> io::Result<()> {
 }
 
 pub fn toggle() -> io::Result<()> {
-    // All panes, any session/window, with sidebar marker and current width.
-    let out = tmux(&[
-        "list-panes",
-        "-a",
-        "-F",
-        "#{pane_id}\t#{pane_width}\t#{@agents_sidebar}",
-    ])?;
     let width = option("@agents-width", "32");
-    if let Some((id, cur)) = out.lines().find_map(|l| {
-        let mut f = l.split('\t');
-        let (id, cur, mark) = (f.next()?, f.next()?, f.next()?);
-        (mark == "1").then(|| (id.to_string(), cur.to_string()))
-    }) {
+    if let Some(sb) = find_sidebar(&tmux(&["list-panes", "-a", "-F", SIDEBAR_FORMAT])?) {
         if option("@agents-toggle", "collapsed") == "hidden" {
-            tmux(&["kill-pane", "-t", &id])?;
+            tmux(&["kill-pane", "-t", &sb.id])?;
         } else {
-            // Left needs a spare column: the pane border sits on the right,
-            // so a 2-wide strip would butt icons against the content.
-            let default = if option("@agents-position", "right") == "left" {
-                "3"
-            } else {
-                "2"
-            };
-            let collapsed = option("@agents-collapsed-width", default);
-            let target = if cur == collapsed { &width } else { &collapsed };
-            tmux(&["resize-pane", "-t", &id, "-x", target])?;
+            let collapsed = option(
+                "@agents-collapsed-width",
+                default_collapsed_width(is_left()),
+            );
+            let target = toggled_width(&sb.width, &collapsed, &width);
+            tmux(&["resize-pane", "-t", &sb.id, "-x", target])?;
         }
         return Ok(());
     }
@@ -85,7 +103,7 @@ pub fn toggle() -> io::Result<()> {
         .ok_or_else(|| io::Error::other("non-utf8 exe path"))?;
 
     let mut args = vec!["split-window", "-h", "-f", "-l", width.as_str()];
-    if option("@agents-position", "right") == "left" {
+    if is_left() {
         args.push("-b");
     }
     args.extend(["-P", "-F", "#{pane_id}", exe]);
@@ -99,4 +117,43 @@ pub fn toggle() -> io::Result<()> {
         "1",
     ])?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_marked_sidebar_pane() {
+        let out = "%1\t120\tmain:0\t\n%7\t32\tmain:2\t1\n%9\t80\twork:1\t\n";
+        assert_eq!(
+            find_sidebar(out),
+            Some(Sidebar {
+                id: "%7".into(),
+                width: "32".into(),
+                at: "main:2".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn no_sidebar_when_unmarked_or_malformed() {
+        assert_eq!(find_sidebar("%1\t120\tmain:0\t\n"), None);
+        assert_eq!(find_sidebar("garbage\n"), None);
+        assert_eq!(find_sidebar(""), None);
+    }
+
+    #[test]
+    fn toggle_flips_between_collapsed_and_expanded() {
+        assert_eq!(toggled_width("2", "2", "32"), "32");
+        assert_eq!(toggled_width("32", "2", "32"), "2");
+        // Manually resized to anything else → collapse.
+        assert_eq!(toggled_width("50", "2", "32"), "2");
+    }
+
+    #[test]
+    fn left_sidebar_gets_spare_collapsed_column() {
+        assert_eq!(default_collapsed_width(true), "3");
+        assert_eq!(default_collapsed_width(false), "2");
+    }
 }

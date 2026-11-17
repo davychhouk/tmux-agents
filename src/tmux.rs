@@ -177,6 +177,6 @@ mod tests {
 
     #[test]
     fn skips_malformed_lines() {
-        assert!(parse_panes("garbage\n").is_empty());
+        assert_eq!(parse_panes("garbage\n"), []);
     }
 }

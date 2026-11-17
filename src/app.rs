@@ -250,13 +250,13 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, interval: Duration) -> io
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::classify::AgentState;
     use crate::detect::AgentKind;
     use crate::tmux::Pane;
 
-    fn agent(session: &str, window: u32) -> Agent {
+    pub(crate) fn agent(session: &str, window: u32) -> Agent {
         Agent {
             pane: Pane {
                 session: session.into(),

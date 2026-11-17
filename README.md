@@ -109,11 +109,11 @@ in the same commit, then:
 cargo fmt --check
 cargo test
 cargo clippy --all-targets
-git tag v0.1.0
-git push origin main v0.1.0
+git tag v0.2.0
+git push origin main v0.2.0
 ```
 
-`agents.tmux` downloads `v0.1.0` by default. For testing another release:
+`agents.tmux` downloads `v0.2.0` by default. For testing another release:
 
 ```tmux
 set -g @agents-version 'v0.1.1'

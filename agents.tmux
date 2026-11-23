@@ -4,7 +4,7 @@ set -u
 dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="davychhouk/tmux-agents"
 version="$(tmux show-option -gqv @agents-version)"
-version="${version:-v0.2.0}"
+version="${version:-v0.3.0}"
 bin="$dir/bin/tmux-agents"
 
 fail() {

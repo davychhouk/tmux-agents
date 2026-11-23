@@ -69,7 +69,7 @@ selection starts on the current window's agent, if it has one.
     set -g @agents-width '32'             # integer columns (no %)
     set -g @agents-collapsed-width '2'    # default: 3 on left, 2 on right; keep < 12
     set -g @agents-interval '1'           # poll seconds (min 1)
-    set -g @agents-version 'v0.2.0'       # release binary to download
+    set -g @agents-version 'v0.3.0'       # release binary to download
 
 Widths are integer column counts; percentages are not supported. The sidebar
 renders icon-only below 12 columns, so keep the collapsed width under 12.
@@ -203,10 +203,10 @@ git tag -a vX.Y.Z -m vX.Y.Z
 git push origin main vX.Y.Z
 ```
 
-`agents.tmux` downloads `v0.2.0` by default. To test another release:
+`agents.tmux` downloads `v0.3.0` by default. To test another release:
 
 ```tmux
-set -g @agents-version 'v0.1.0'
+set -g @agents-version 'v0.2.0'
 ```
 
 ## How it works

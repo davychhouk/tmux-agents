@@ -382,6 +382,25 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn shared_pane_holds_state_through_transcript_view() {
+        use AgentKind::{Claude, Codex};
+        let p = pane(1);
+        let regions = [(
+            Claude,
+            "history\nShowing detailed transcript · ctrl+o to toggle".to_string(),
+        )];
+        let (mut raw, mut state) = (AgentState::Working, AgentState::Working);
+        for _ in 0..3 {
+            (raw, state) = evaluate(
+                signals(&p, Claude, &[Claude, Codex], "pane", &regions),
+                Some(state),
+                Some(raw),
+            );
+            assert_eq!(state, AgentState::Working);
+        }
+    }
+
+    #[test]
     fn second_agent_starting_does_not_mark_first_done() {
         use AgentKind::{Claude, Codex};
         let mut p = pane(1);

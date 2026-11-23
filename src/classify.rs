@@ -193,12 +193,14 @@ pub fn agent_regions(pane_text: &str) -> Vec<(AgentKind, String)> {
         .collect()
 }
 
-/// Claude: input box or its own `❯` dialog line; codex: `›` composer or banner.
+/// Claude: input box, its own `❯` dialog line or transcript footer; codex: `›` composer or banner.
 fn region_owner(region: &str) -> Option<AgentKind> {
     let lines: Vec<&str> = region.lines().collect();
     let caret = |l: &&str| l.starts_with('❯');
     let claude = has_input_box(region)
-        || lines.iter().any(|l| caret(l) && is_blocked(l))
+        || lines
+            .iter()
+            .any(|l| caret(l) && is_blocked(l) || is_transcript_footer(l))
         || (lines.iter().any(caret) && lines.iter().any(|l| is_select_footer(&l.to_lowercase())));
     let codex = lines
         .iter()
@@ -324,9 +326,11 @@ fn hook_state(value: &str) -> Option<AgentState> {
 /// nothing on it reflects the turn's real state, so the caller should hold
 /// the last known state while it is up.
 fn is_transcript_view(pane_text: &str) -> bool {
-    tail(pane_text)
-        .iter()
-        .any(|l| !l.contains('"') && l.to_lowercase().contains("showing detailed transcript"))
+    tail(pane_text).iter().any(|l| is_transcript_footer(l))
+}
+
+fn is_transcript_footer(line: &str) -> bool {
+    !line.contains('"') && line.to_lowercase().contains("showing detailed transcript")
 }
 
 fn classify(pane_text: &str) -> AgentState {
@@ -717,6 +721,22 @@ mod tests {
         let text = split(codex, &idle_box());
         let codex = region(&text, AgentKind::Codex).unwrap();
         assert_eq!(classify(&codex), AgentState::Blocked);
+    }
+
+    #[test]
+    fn region_claims_claude_transcript_view_and_holds_state() {
+        // ctrl+o replaces claude's input box with history plus its own footer.
+        let viewer = "⏺ Earlier answer\n  more history\n\
+                      Showing detailed transcript · ctrl+o to toggle";
+        let text = split(CODEX_WORKING, viewer);
+        let claude = region(&text, AgentKind::Claude).unwrap();
+        assert_eq!(
+            resolve_state(&claude, "", "", Some(AgentState::Working)),
+            AgentState::Working
+        );
+        // Quoted mention of the footer isn't the viewer.
+        let quoted = "the footer reads \"Showing detailed transcript\"\n~\n~";
+        assert!(region(&split(CODEX_WORKING, quoted), AgentKind::Claude).is_none());
     }
 
     #[test]

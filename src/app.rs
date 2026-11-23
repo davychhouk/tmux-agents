@@ -8,7 +8,7 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::execute;
 use ratatui::widgets::ListState;
 
-use crate::classify::{AgentState, resolve_state};
+use crate::classify::{AgentState, agent_region, resolve_state};
 use crate::detect::{AgentKind, find_agents, ps_snapshot};
 use crate::{tmux, toggle, ui};
 
@@ -72,9 +72,9 @@ fn record_history(
 /// (hook, screen text, title) to classify one agent of `kinds` (all agents
 /// in its pane) by. The per-kind hook option wins. The shared
 /// `@agent_state` counts when no other agent in the pane could have written
-/// it — they each have their own option. Screen and title count only when
-/// the agent has the pane to itself: with two, they don't say whose state
-/// it is.
+/// it — they each have their own option. In a shared pane `text` is the
+/// agent's own screen region (see `agent_region`), and the pane title is
+/// dropped: it doesn't say whose state it is.
 fn signals<'a>(
     pane: &'a tmux::Pane,
     kind: AgentKind,
@@ -91,7 +91,7 @@ fn signals<'a>(
     if kinds.len() == 1 {
         (hook, text, &pane.title)
     } else {
-        (hook, "", "")
+        (hook, text, "")
     }
 }
 
@@ -130,8 +130,13 @@ fn refresh(
         }
         for &kind in &kinds {
             let id = format!("{}/{}", pane.id, kind.label());
+            let region = if kinds.len() == 1 {
+                None
+            } else {
+                Some(agent_region(&text, kind).unwrap_or_default())
+            };
             let (raw, state) = evaluate(
-                signals(&pane, kind, &kinds, &text),
+                signals(&pane, kind, &kinds, region.as_deref().unwrap_or(&text)),
                 prev_states.get(&id).copied(),
                 prev_raw.get(&id).copied(),
             );
@@ -352,8 +357,10 @@ pub(crate) mod tests {
         p.title = "⠹ repo".into();
         p.hook_state = "working".into();
         // Neither has its own option: the shared one could be either's.
-        assert_eq!(signals(&p, Claude, &both, "screen"), ("", "", ""));
-        assert_eq!(signals(&p, Codex, &both, "screen"), ("", "", ""));
+        // The screen passed in is already the agent's own region (or empty);
+        // the pane title is never attributable.
+        assert_eq!(signals(&p, Claude, &both, "region"), ("", "region", ""));
+        assert_eq!(signals(&p, Codex, &both, ""), ("", "", ""));
         // No hook, no screen → idle, not the other agent's state.
         assert_eq!(resolve_state("", "", "", None), AgentState::Idle);
     }
@@ -366,8 +373,8 @@ pub(crate) mod tests {
         p.hook_state = "working".into();
         p.hook_codex = "blocked".into();
         // Codex has its own option, so only claude writes the shared one.
-        assert_eq!(signals(&p, Codex, &both, "screen"), ("blocked", "", ""));
-        assert_eq!(signals(&p, Claude, &both, "screen"), ("working", "", ""));
+        assert_eq!(signals(&p, Codex, &both, ""), ("blocked", "", ""));
+        assert_eq!(signals(&p, Claude, &both, ""), ("working", "", ""));
     }
 
     #[test]

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use crate::detect::AgentKind;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentState {
     Working,
@@ -142,6 +144,40 @@ fn has_input_box(pane_text: &str) -> bool {
             .zip(&w[1])
             .any(|(above, seg)| is_hrule(above) && seg.starts_with('❯'))
     })
+}
+
+/// Text of the screen region showing `kind`'s own UI, for agents sharing a
+/// pane (e.g. two nvim terminal splits). Regions are split at vertical
+/// rules and claimed by each agent's prompt line: claude's input box, codex's
+/// `›` composer. `None` when the agent isn't on screen or the claim is
+/// ambiguous — the caller then has no screen evidence for it.
+pub fn agent_region(pane_text: &str, kind: AgentKind) -> Option<String> {
+    let lines: Vec<&str> = pane_text.lines().collect();
+    let rules = rule_columns(&lines);
+    let rows: Vec<Vec<String>> = lines.iter().map(|l| segments(l, &rules)).collect();
+    let width = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut mine = (0..width)
+        .map(|k| {
+            rows.iter()
+                .map(|r| r.get(k).map_or("", String::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|region| region_owner(region) == Some(kind));
+    let region = mine.next()?;
+    mine.next().is_none().then_some(region)
+}
+
+fn region_owner(region: &str) -> Option<AgentKind> {
+    let claude = has_input_box(region);
+    let codex = region
+        .lines()
+        .any(|l| l.starts_with('›') || l.to_lowercase().contains("openai codex"));
+    match (claude, codex) {
+        (true, false) => Some(AgentKind::Claude),
+        (false, true) => Some(AgentKind::Codex),
+        _ => None,
+    }
 }
 
 fn is_hrule(seg: &str) -> bool {
@@ -493,6 +529,58 @@ mod tests {
             resolve_state(&idle_box(), "", "idle", None),
             AgentState::Idle
         );
+    }
+
+    /// Two nvim splits side by side, separated by a `│` rule.
+    fn split(left: &str, right: &str) -> String {
+        let (l, r): (Vec<&str>, Vec<&str>) = (left.lines().collect(), right.lines().collect());
+        (0..l.len().max(r.len()))
+            .map(|i| {
+                format!(
+                    "{:<45}│{}",
+                    l.get(i).copied().unwrap_or(""),
+                    r.get(i).copied().unwrap_or("")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    const CODEX_WORKING: &str = "• Ran cargo test\n\nWorking (5s • esc to interrupt)\n\n› Ask Codex to do anything\n\n  ? for shortcuts";
+
+    #[test]
+    fn region_attributes_each_split_to_its_agent() {
+        let text = split(CODEX_WORKING, &idle_box());
+        let claude = agent_region(&text, AgentKind::Claude).unwrap();
+        let codex = agent_region(&text, AgentKind::Codex).unwrap();
+        assert_eq!(classify(&claude), AgentState::Idle);
+        assert_eq!(classify(&codex), AgentState::Working);
+        // The other agent's spinner/footer isn't in this agent's region.
+        assert!(!claude.contains("Working"));
+        assert!(!codex.contains("Cooked"));
+    }
+
+    #[test]
+    fn region_none_when_agent_not_on_screen() {
+        // Codex's buffer hidden; only nvim's dashboard beside claude.
+        let text = split("  Find File   f\n  Quit        q\n\n", &working_box());
+        assert!(agent_region(&text, AgentKind::Codex).is_none());
+        assert!(agent_region(&text, AgentKind::Claude).is_some());
+    }
+
+    #[test]
+    fn region_ignores_shell_prompt_that_looks_like_claude() {
+        // A starship-style `❯` shell prompt isn't claude's input box.
+        let text = split("~/p/repo\n❯ cargo test\n\n", CODEX_WORKING);
+        assert!(agent_region(&text, AgentKind::Claude).is_none());
+        assert!(agent_region(&text, AgentKind::Codex).is_some());
+    }
+
+    #[test]
+    fn region_none_when_both_agents_claim_one_region() {
+        let both = format!("{}\n{CODEX_WORKING}", idle_box());
+        assert!(agent_region(&both, AgentKind::Claude).is_none());
+        assert!(agent_region(&both, AgentKind::Codex).is_none());
     }
 
     #[test]

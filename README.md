@@ -137,7 +137,7 @@ CI on Linux and macOS.
 
 | module        | tests | covers                                                                                                                                        |
 | ------------- | ----: | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `classify.rs` |    52 | working/blocked/idle from screen text, titles and hook state; screen correcting stale hooks; attributing split regions to agents; dialogs, side-by-side splits, transcript view, false positives from quoted text and prose |
+| `classify.rs` |    54 | working/blocked/idle from screen text, titles and hook state; screen correcting stale hooks; attributing split regions to agents; dialogs, side-by-side splits, transcript view, false positives from quoted text and prose |
 | `detect.rs`   |    14 | finding claude/codex in process trees (direct, nested in nvim, via interpreters, both in one pane, agent run as another's tool), `ps` parsing |
 | `app.rs`      |    11 | done debounce, session grouping, j/k selection skipping headers, selection kept across refreshes, picking each agent's hook in a shared pane |
 | `toggle.rs`   |     4 | finding the sidebar pane, collapse/expand width, default collapsed width per side                                                             |
@@ -254,8 +254,8 @@ other.
 
 Without per-agent hooks, the screen still works when each agent is visible
 in its own split: the pane is cut at nvim's vertical separators and each
-region is claimed by its agent's prompt line (claude's input box, codex's
-`›` composer). An agent whose split is hidden or covered (another tab, a
+region is claimed by its agent's prompt line (claude's input box or a
+claude dialog choice, codex's `›` composer). An agent whose split is hidden or covered (another tab, a
 floating window) has no screen evidence, so it shows idle rather than the
 other agent's state. The pane title never counts in a shared pane.
 

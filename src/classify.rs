@@ -82,6 +82,16 @@ fn rule_columns(lines: &[&str]) -> Vec<usize> {
 /// holding a `"` is source or a diff quoting our patterns back at us — live
 /// UI text is never drawn wrapped in quote marks — so it is dropped.
 fn segments(line: &str, rules: &[usize]) -> Vec<String> {
+    // Blank rather than drop, so region indices stay aligned across lines.
+    regions(line, rules)
+        .into_iter()
+        .map(|s| if s.contains('"') { String::new() } else { s })
+        .collect()
+}
+
+/// `line` cut at rule columns, trimmed, quotes kept: for finding prompt
+/// lines, where a quote is just something the user typed.
+fn regions(line: &str, rules: &[usize]) -> Vec<String> {
     let mut segs = Vec::new();
     let mut cur = String::new();
     for (col, c) in line.chars().enumerate() {
@@ -92,16 +102,7 @@ fn segments(line: &str, rules: &[usize]) -> Vec<String> {
         }
     }
     segs.push(cur);
-    // Blank rather than drop, so region indices stay aligned across lines.
-    segs.into_iter()
-        .map(|s| {
-            if s.contains('"') {
-                String::new()
-            } else {
-                s.trim().to_string()
-            }
-        })
-        .collect()
+    segs.into_iter().map(|s| s.trim().to_string()).collect()
 }
 
 fn starts_with(seg: &str, marks: &[char]) -> bool {
@@ -138,7 +139,7 @@ fn timed_interrupt_hint(low: &str) -> bool {
 fn has_input_box(pane_text: &str) -> bool {
     let tail = tail(pane_text);
     let rules = rule_columns(&tail);
-    let rows: Vec<Vec<String>> = tail.iter().map(|l| segments(l, &rules)).collect();
+    let rows: Vec<Vec<String>> = tail.iter().map(|l| regions(l, &rules)).collect();
     rows.windows(2).any(|w| {
         w[0].iter()
             .zip(&w[1])
@@ -148,13 +149,14 @@ fn has_input_box(pane_text: &str) -> bool {
 
 /// Text of the screen region showing `kind`'s own UI, for agents sharing a
 /// pane (e.g. two nvim terminal splits). Regions are split at vertical
-/// rules and claimed by each agent's prompt line: claude's input box, codex's
-/// `›` composer. `None` when the agent isn't on screen or the claim is
+/// rules and claimed by each agent's prompt line: claude's input box or
+/// dialog, codex's `›` composer. `None` when the agent isn't on screen or the claim is
 /// ambiguous — the caller then has no screen evidence for it.
 pub fn agent_region(pane_text: &str, kind: AgentKind) -> Option<String> {
     let lines: Vec<&str> = pane_text.lines().collect();
     let rules = rule_columns(&lines);
-    let rows: Vec<Vec<String>> = lines.iter().map(|l| segments(l, &rules)).collect();
+    // Raw text: `classify` drops quoted lines itself when it scans the region.
+    let rows: Vec<Vec<String>> = lines.iter().map(|l| regions(l, &rules)).collect();
     let width = rows.iter().map(Vec::len).max().unwrap_or(0);
     let mut mine = (0..width)
         .map(|k| {
@@ -168,8 +170,11 @@ pub fn agent_region(pane_text: &str, kind: AgentKind) -> Option<String> {
     mine.next().is_none().then_some(region)
 }
 
+/// Claude claims a region by its input box, or by a live dialog choice with
+/// its `❯` caret (the dialog replaces the box). Codex's carets are `›`.
 fn region_owner(region: &str) -> Option<AgentKind> {
-    let claude = has_input_box(region);
+    let claude =
+        has_input_box(region) || region.lines().any(|l| l.starts_with('❯') && is_blocked(l));
     let codex = region
         .lines()
         .any(|l| l.starts_with('›') || l.to_lowercase().contains("openai codex"));
@@ -574,6 +579,32 @@ mod tests {
         let text = split("~/p/repo\n❯ cargo test\n\n", CODEX_WORKING);
         assert!(agent_region(&text, AgentKind::Claude).is_none());
         assert!(agent_region(&text, AgentKind::Codex).is_some());
+    }
+
+    #[test]
+    fn region_claims_claude_permission_dialog() {
+        // The dialog replaces claude's input box.
+        let dialog = "Bash command\n\nDo you want to proceed?\n❯ 1. Yes\n  2. No";
+        let text = split(CODEX_WORKING, dialog);
+        let claude = agent_region(&text, AgentKind::Claude).unwrap();
+        assert_eq!(resolve_state(&claude, "", "", None), AgentState::Blocked);
+        // Codex's approval caret is `›`: still codex's, not claude's.
+        let codex_dialog = "Allow command?\n› 1. Yes, proceed (y)\n  2. No (esc)";
+        let text = split(codex_dialog, &idle_box());
+        let codex = agent_region(&text, AgentKind::Codex).unwrap();
+        assert_eq!(classify(&codex), AgentState::Blocked);
+        assert!(agent_region(&text, AgentKind::Claude).is_some());
+    }
+
+    #[test]
+    fn region_survives_quotes_typed_in_prompt() {
+        let codex = CODEX_WORKING.replace("Ask Codex to do anything", "explain \"foo\"");
+        let claude = working_box().replace("❯ ", "❯ explain \"foo\"");
+        let text = split(&codex, &claude);
+        let codex = agent_region(&text, AgentKind::Codex).unwrap();
+        let claude = agent_region(&text, AgentKind::Claude).unwrap();
+        assert_eq!(classify(&codex), AgentState::Working);
+        assert_eq!(classify(&claude), AgentState::Working);
     }
 
     #[test]

@@ -26,8 +26,12 @@ Prebuilt binaries are published for macOS and Linux on x86_64 and arm64.
 - **Live status**: each agent shows as working (animated spinner), blocked
   (`?`, waiting on you), done (`✓`, finished a task), or idle (`○`).
 - **Accurate state detection**: uses the agent's own hooks when set up, then
-  its terminal title, then what's on screen. Short idle blips while working
-  are smoothed out so nothing flashes "done" mid-task.
+  its terminal title, then what's on screen, and the screen corrects hooks
+  that went stale. Short idle blips while working are smoothed out so nothing
+  flashes "done" mid-task.
+- **Shared panes**: claude and codex in one pane (e.g. two nvim terminal
+  windows) each get their own row and status, read from per-agent hooks or
+  from each agent's own nvim window on screen.
 - **Grouped by session**: agents listed under their tmux session, with window
   name and pane title.
 - **Jump to agent**: `Enter` switches to the agent's session, window and pane,
@@ -137,9 +141,9 @@ CI on Linux and macOS.
 
 | module        | tests | covers                                                                                                                                        |
 | ------------- | ----: | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `classify.rs` |    65 | working/blocked/idle from screen text, titles and hook state; screen correcting stale hooks; attributing split regions to agents; dialogs, side-by-side splits, transcript view, false positives from quoted text and prose |
+| `classify.rs` |    65 | working/blocked/idle from screen text, titles and hook state; screen correcting stale hooks; attributing nvim windows (side by side and stacked) to agents; dialogs, transcript view, wide characters, false positives from quoted text and prose |
 | `detect.rs`   |    15 | finding claude/codex in process trees (direct, nested in nvim, via interpreters, both in one pane, agent run as another's tool), `ps` parsing |
-| `app.rs`      |    12 | done debounce, session grouping, j/k selection skipping headers, selection kept across refreshes, picking each agent's hook in a shared pane |
+| `app.rs`      |    12 | done debounce, session grouping, j/k selection skipping headers, selection kept across refreshes, each agent's signals in a shared pane, unknown state not marked done, holding state through transcript view |
 | `toggle.rs`   |     4 | finding the sidebar pane, collapse/expand width, default collapsed width per side                                                             |
 | `ui.rs`       |     4 | highlight only while focused, collapsed-mode selection, title cleanup                                                                         |
 | `tmux.rs`     |     2 | parsing `list-panes` output                                                                                                                   |
@@ -177,7 +181,7 @@ Current numbers:
 | `toggle.rs`   |  37.3% |     56.3% |
 | `tmux.rs`     |  39.3% |     35.7% |
 | `main.rs`     |   0.0% |      0.0% |
-| **total**     |  80.7% |     88.2% |
+| **total**     |  81.0% |     88.6% |
 
 The pure logic (state detection, process detection, rendering) is nearly
 fully covered. The low numbers are the tmux side: the event loop, tmux
@@ -219,17 +223,21 @@ working / blocked / idle. An agent that goes from working to idle shows as
 done (green) until it starts working again. The switch to done waits for a
 second idle reading, so a brief pause mid-task doesn't flash done.
 
-Per pane, signals are consulted in order:
+Per agent, signals are consulted in order:
 
-1. **`@agent_state` pane option** — ground truth, pushed by the agent's own
-   lifecycle hooks (see below). A live dialog on screen still overrides a
-   non-blocked value, since some dialogs emit no hook event.
+1. **Hook state** — `@agent_state_claude` / `@agent_state_codex`, else the
+   shared `@agent_state` pane option, pushed by the agent's own lifecycle
+   hooks (see below). Trusted unless the screen clearly contradicts it: a
+   live dialog means blocked, and visible work or an idle input box clears a
+   stale working/blocked.
 2. **Pane title (OSC)** — a leading braille spinner frame means working;
-   codex titles a pending approval "Action Required".
+   codex titles a pending approval "Action Required". Ignored in a pane
+   shared by two agents.
 3. **Screen scraping** — `capture-pane` tail matched against live UI shapes
-   (spinners, interrupt hints, dialog choices/footers). Side-by-side splits
-   (e.g. an agent in an nvim split) are read as separate regions, and claude's
-   `ctrl+o` transcript view keeps the last known state.
+   (spinners, interrupt hints, dialog choices/footers). Side-by-side nvim
+   windows are read as separate regions; in a shared pane each agent reads
+   only its own window, side by side or stacked. Claude's `ctrl+o` transcript
+   view keeps the last known state.
 
 ### Hook integration (optional, most accurate)
 
@@ -264,14 +272,14 @@ them and can't be told apart from content. A window that's hidden or covered
 shows idle rather than the other agent's state. The pane title never counts
 in a shared pane.
 
-| event                                         | state                                         |
-| --------------------------------------------- | --------------------------------------------- |
-| `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `working`                                     |
-| `Stop`                                        | `done`                                        |
-| `SessionStart`                                | `idle`                                        |
-| `SessionEnd`                                  | unset: `tmux set -p -u -t "$TMUX_PANE" @agent_state` |
-| `PermissionRequest` (claude)                  | `blocked`                                     |
-| `Interrupt` (codex)                           | `idle`                                        |
+| event                                           | state                                                 |
+| ----------------------------------------------- | ----------------------------------------------------- |
+| `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `working`                                             |
+| `Stop`                                          | `done`                                                |
+| `SessionStart`                                  | `idle`                                                |
+| `SessionEnd`                                    | unset: `tmux set -p -u -t "$TMUX_PANE" @agent_state` |
+| `PermissionRequest` (claude)                    | `blocked`                                             |
+| `Interrupt` (codex)                             | `idle`                                                |
 
 `PostToolUse` clears `blocked` once an approved tool runs. Use claude's
 `PermissionRequest` rather than its `Notification` hook: the permission

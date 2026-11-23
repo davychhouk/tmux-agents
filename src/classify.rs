@@ -170,19 +170,29 @@ pub fn agent_region(pane_text: &str, kind: AgentKind) -> Option<String> {
     mine.next().is_none().then_some(region)
 }
 
-/// Claude claims a region by its input box, or by a live dialog choice with
-/// its `❯` caret (the dialog replaces the box). Codex's carets are `›`.
+/// Claude claims a region by its input box, or by a live dialog — its `❯`
+/// caret plus a dialog shape (Yes/No choice or select footer), since the
+/// dialog replaces the box. Codex by its `›` composer or its banner line;
+/// its name elsewhere (transcript, source) proves nothing.
 fn region_owner(region: &str) -> Option<AgentKind> {
-    let claude =
-        has_input_box(region) || region.lines().any(|l| l.starts_with('❯') && is_blocked(l));
-    let codex = region
-        .lines()
-        .any(|l| l.starts_with('›') || l.to_lowercase().contains("openai codex"));
+    let lines: Vec<&str> = region.lines().collect();
+    let claude = has_input_box(region)
+        || (lines.iter().any(|l| l.starts_with('❯')) && lines.iter().any(|l| is_blocked(l)));
+    let codex = lines
+        .iter()
+        .any(|l| l.starts_with('›') || is_codex_banner(l));
     match (claude, codex) {
         (true, false) => Some(AgentKind::Claude),
         (false, true) => Some(AgentKind::Codex),
         _ => None,
     }
+}
+
+/// `>_ OpenAI Codex (v0.171.0)`, bare or inside its box border.
+fn is_codex_banner(line: &str) -> bool {
+    line.trim_start_matches(|c: char| BORDERS.contains(&c) || c.is_whitespace())
+        .to_lowercase()
+        .starts_with(">_ openai codex")
 }
 
 fn is_hrule(seg: &str) -> bool {
@@ -594,6 +604,32 @@ mod tests {
         let codex = agent_region(&text, AgentKind::Codex).unwrap();
         assert_eq!(classify(&codex), AgentState::Blocked);
         assert!(agent_region(&text, AgentKind::Claude).is_some());
+    }
+
+    #[test]
+    fn region_claims_claude_question_picker() {
+        // No Yes/No label: the caret plus the dialog footer claim it.
+        let picker = "Which approach?\n  ❯ Option A\n    Option B\n\
+                      ↑/↓ to navigate · Enter to select · Esc to cancel";
+        let text = split(CODEX_WORKING, picker);
+        let claude = agent_region(&text, AgentKind::Claude).unwrap();
+        assert_eq!(resolve_state(&claude, "", "", None), AgentState::Blocked);
+    }
+
+    #[test]
+    fn region_codex_claimed_by_banner_not_by_its_name_in_text() {
+        // Claude's transcript mentioning codex doesn't make the region codex's.
+        let claude = format!("The label is \"OpenAI Codex\".\n{}", working_box());
+        let text = split("~\n~\n~", &claude);
+        let claude = agent_region(&text, AgentKind::Claude).unwrap();
+        assert_eq!(classify(&claude), AgentState::Working);
+        // The real banner (inside its box) still claims codex's region.
+        let banner = "╭──────────────────────────────╮\n\
+                      │ >_ OpenAI Codex (v0.171.0)   │\n\
+                      │ model: gpt-5                 │\n\
+                      ╰──────────────────────────────╯";
+        let text = split(banner, &idle_box());
+        assert!(agent_region(&text, AgentKind::Codex).is_some());
     }
 
     #[test]

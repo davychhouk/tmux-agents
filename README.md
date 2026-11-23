@@ -137,7 +137,7 @@ CI on Linux and macOS.
 
 | module        | tests | covers                                                                                                                                        |
 | ------------- | ----: | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `classify.rs` |    43 | working/blocked/idle from screen text, titles and hook state; screen correcting stale hooks; dialogs, side-by-side splits, transcript view, false positives from quoted text and prose |
+| `classify.rs` |    46 | working/blocked/idle from screen text, titles and hook state; screen correcting stale hooks; dialogs, side-by-side splits, transcript view, false positives from quoted text and prose |
 | `detect.rs`   |    11 | finding claude/codex in process trees (direct, nested in nvim, via interpreters), `ps` parsing                                                |
 | `app.rs`      |     7 | done debounce, session grouping, j/k selection skipping headers, selection kept across refreshes                                              |
 | `toggle.rs`   |     4 | finding the sidebar pane, collapse/expand width, default collapsed width per side                                                             |

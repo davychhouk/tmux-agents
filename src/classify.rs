@@ -107,14 +107,16 @@ fn starts_with(seg: &str, marks: &[char]) -> bool {
 }
 
 /// A spinner leads its region; a glyph inside running text is prose or code.
-/// The interrupt hint ends its footer line (`… · esc to interrupt`,
-/// `(12s · esc to interrupt)`); mid-line it's prose talking about it.
+/// The interrupt hint either ends its footer line (`… · esc to interrupt`)
+/// or closes the status parenthetical (`(12s • esc to interrupt)`), which
+/// codex can follow with ` · 1 background terminal running …`. Anywhere
+/// else it's prose talking about it.
 fn is_working(seg: &str) -> bool {
     let low = seg.to_lowercase();
     starts_with(seg, BRAILLE)
         || (starts_with(seg, CLAUDE_GLYPHS) && seg.contains('…'))
         || low.ends_with(INTERRUPT)
-        || low.ends_with(&format!("{INTERRUPT})"))
+        || low.contains(&format!("{INTERRUPT})"))
 }
 
 /// Claude's live input box: a `❯` line directly under a horizontal rule, in
@@ -162,10 +164,18 @@ fn is_blocked(seg: &str) -> bool {
     }
     let rest = seg.trim_start_matches(|c| CARETS.contains(&c)).trim_start();
     let rest = rest.to_lowercase();
+    // Any numbered yes/no choice: the user can move the caret off "1. Yes".
     let numbered = rest
-        .strip_prefix("1. yes")
-        .is_some_and(|tail| !tail.starts_with(|c: char| c.is_alphanumeric()));
-    numbered || rest.starts_with("yes (y")
+        .split_once(". ")
+        .filter(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+        .is_some_and(|(_, choice)| {
+            ["yes", "no"].iter().any(|w| {
+                choice
+                    .strip_prefix(w)
+                    .is_some_and(|tail| !tail.starts_with(|c: char| c.is_alphanumeric()))
+            })
+        });
+    numbered || rest.starts_with("yes (y") || rest.starts_with("no (n")
 }
 
 /// Agents announce state through the terminal title (OSC 0/2), which tmux
@@ -263,6 +273,39 @@ mod tests {
     fn blocked_on_claude_permission_prompt() {
         let text = "Bash command\n\nDo you want to proceed?\n❯ 1. Yes\n  2. No";
         assert_eq!(classify(text), AgentState::Blocked);
+    }
+
+    #[test]
+    fn blocked_with_selection_moved_off_yes() {
+        let dialog = |sel: usize| {
+            [
+                "1. Yes",
+                "2. Yes, and don't ask again",
+                "3. No, and tell Claude (esc)",
+            ]
+            .iter()
+            .enumerate()
+            .map(|(i, c)| format!("{} {c}", if i == sel { "❯" } else { " " }))
+            .collect::<Vec<_>>()
+            .join("\n")
+        };
+        for sel in 0..3 {
+            let text = format!("✢ Doing… (5s)\nDo you want to proceed?\n{}", dialog(sel));
+            assert_eq!(classify(&text), AgentState::Blocked, "selected {sel}");
+            // Must not read as working and clear a correct blocked hook.
+            assert_eq!(
+                resolve_state(&text, "", "blocked", None),
+                AgentState::Blocked
+            );
+        }
+        assert_eq!(classify("› No (n)"), AgentState::Blocked);
+    }
+
+    #[test]
+    fn idle_on_caret_line_that_is_not_a_choice() {
+        // Echoed user prompt or numbered output with a caret.
+        assert_eq!(classify("❯ 2. nothing else to add"), AgentState::Idle);
+        assert_eq!(classify("❯ 1. yesterday's build"), AgentState::Idle);
     }
 
     #[test]
@@ -534,6 +577,17 @@ mod tests {
     #[test]
     fn working_on_braille_spinner() {
         assert_eq!(classify("⠹ Running tests"), AgentState::Working);
+    }
+
+    #[test]
+    fn working_on_codex_status_with_inline_message() {
+        // Codex appends background-terminal info after the hint.
+        assert_eq!(
+            classify(
+                "Working (5s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close"
+            ),
+            AgentState::Working
+        );
     }
 
     #[test]

@@ -178,11 +178,12 @@ pub fn agent_regions(pane_text: &str) -> Vec<(AgentKind, String)> {
     let rows: Vec<Vec<String>> = lines.iter().map(|l| regions(l, &cuts)).collect();
     let width = rows.iter().map(Vec::len).max().unwrap_or(0);
     let owned: Vec<(AgentKind, String)> = (0..width)
-        .map(|k| {
-            rows.iter()
+        .flat_map(|k| {
+            let column: Vec<&str> = rows
+                .iter()
                 .map(|r| r.get(k).map_or("", String::as_str))
-                .collect::<Vec<_>>()
-                .join("\n")
+                .collect();
+            window_bands(&column)
         })
         .filter_map(|region| Some((region_owner(&region)?, region)))
         .collect();
@@ -193,12 +194,45 @@ pub fn agent_regions(pane_text: &str) -> Vec<(AgentKind, String)> {
         .collect()
 }
 
-/// Claude: input box or its own `❯` dialog line; codex: `›` composer or banner.
+/// `lines` cut into stacked nvim windows at their separator rows.
+fn window_bands(lines: &[&str]) -> Vec<String> {
+    let mut bands = vec![Vec::new()];
+    for (i, line) in lines.iter().enumerate() {
+        if is_window_separator(lines, i) {
+            bands.push(Vec::new());
+        } else if let Some(band) = bands.last_mut() {
+            band.push(*line);
+        }
+    }
+    bands.into_iter().map(|b| b.join("\n")).collect()
+}
+
+/// A `─` row between stacked windows (`laststatus=3`), not one of claude's input box rules.
+fn is_window_separator(lines: &[&str], i: usize) -> bool {
+    let rule = |l: &str| l.chars().count() >= 10 && l.chars().all(|c| "─┬┴┼├┤".contains(c));
+    if !rule(lines[i]) {
+        return false;
+    }
+    // ponytail: prompts taller than 6 lines read as a separator; raise the window if that bites
+    let box_top = |j: usize| {
+        rule(lines[j])
+            && lines.get(j + 1).is_some_and(|l| l.starts_with('❯'))
+            && lines[j + 1..].iter().take(7).any(|l| rule(l))
+    };
+    let closes_box = (i.saturating_sub(7)..i)
+        .rev()
+        .find(|&j| rule(lines[j]))
+        .is_some_and(box_top);
+    !box_top(i) && !closes_box
+}
+
+/// Claude: input box, its own `❯` dialog line or transcript footer; codex: `›` composer or banner.
 fn region_owner(region: &str) -> Option<AgentKind> {
     let lines: Vec<&str> = region.lines().collect();
     let caret = |l: &&str| l.starts_with('❯');
     let claude = has_input_box(region)
         || lines.iter().any(|l| caret(l) && is_blocked(l))
+        || live_footer(&lines).any(|l| is_transcript_footer(l))
         || (lines.iter().any(caret) && lines.iter().any(|l| is_select_footer(&l.to_lowercase())));
     let codex = lines
         .iter()
@@ -324,9 +358,23 @@ fn hook_state(value: &str) -> Option<AgentState> {
 /// nothing on it reflects the turn's real state, so the caller should hold
 /// the last known state while it is up.
 fn is_transcript_view(pane_text: &str) -> bool {
-    tail(pane_text)
-        .iter()
-        .any(|l| !l.contains('"') && l.to_lowercase().contains("showing detailed transcript"))
+    // Cut at split rules first: beside an editor the footer doesn't start the line.
+    let tail = tail(pane_text);
+    let rules = rule_columns(&tail);
+    tail.iter()
+        .flat_map(|l| segments(l, &rules))
+        .any(|seg| is_transcript_footer(&seg))
+}
+
+/// `Showing detailed transcript · ctrl+o to toggle`: the viewer's footer, not prose quoting it.
+fn is_transcript_footer(line: &str) -> bool {
+    let low = line.trim().to_lowercase();
+    !low.contains('"') && low.starts_with("showing detailed transcript") && low.contains("ctrl+o")
+}
+
+/// The last few non-empty lines, where an agent's live footer sits.
+fn live_footer<'a>(lines: &'a [&'a str]) -> impl Iterator<Item = &'a &'a str> {
+    lines.iter().rev().filter(|l| !l.trim().is_empty()).take(3)
 }
 
 fn classify(pane_text: &str) -> AgentState {
@@ -720,6 +768,97 @@ mod tests {
     }
 
     #[test]
+    fn region_claims_claude_transcript_view_and_holds_state() {
+        // ctrl+o replaces claude's input box with history plus its own footer.
+        let viewer = "⏺ Earlier answer\n  more history\n\
+                      Showing detailed transcript · ctrl+o to toggle";
+        let text = split(CODEX_WORKING, viewer);
+        let claude = region(&text, AgentKind::Claude).unwrap();
+        assert_eq!(
+            resolve_state(&claude, "", "", Some(AgentState::Working)),
+            AgentState::Working
+        );
+        // Quoted mention of the footer isn't the viewer.
+        let quoted = "the footer reads \"Showing detailed transcript\"\n~\n~";
+        assert!(region(&split(CODEX_WORKING, quoted), AgentKind::Claude).is_none());
+    }
+
+    /// nvim `:split` with `laststatus=3`: windows stacked, a `─` row between.
+    fn stacked(top: &str, bottom: &str) -> String {
+        format!("{top}\n{}\n{bottom}", "─".repeat(60))
+    }
+
+    const CODEX_IDLE: &str = "• Ran cargo test\n\n› Ask Codex to do anything\n\n  ? for shortcuts";
+
+    #[test]
+    fn region_splits_stacked_windows() {
+        // Claude on top, codex below: claude's footer must not leak down.
+        let text = stacked(&working_box(), CODEX_IDLE);
+        assert_eq!(
+            classify(&region(&text, AgentKind::Claude).unwrap()),
+            AgentState::Working
+        );
+        assert_eq!(
+            classify(&region(&text, AgentKind::Codex).unwrap()),
+            AgentState::Idle
+        );
+        // And the other way round.
+        let text = stacked(CODEX_WORKING, &idle_box());
+        assert_eq!(
+            classify(&region(&text, AgentKind::Codex).unwrap()),
+            AgentState::Working
+        );
+        assert_eq!(
+            classify(&region(&text, AgentKind::Claude).unwrap()),
+            AgentState::Idle
+        );
+    }
+
+    #[test]
+    fn region_splits_stacked_windows_below_a_dialog() {
+        // Claude's approval dialog (no input box) right above the separator.
+        let dialog = "Bash command\n\nDo you want to proceed?\n❯ 1. Yes\n  2. No";
+        let text = stacked(dialog, CODEX_WORKING);
+        assert_eq!(
+            resolve_state(&region(&text, AgentKind::Claude).unwrap(), "", "", None),
+            AgentState::Blocked
+        );
+        assert_eq!(
+            classify(&region(&text, AgentKind::Codex).unwrap()),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn region_transcript_footer_must_be_the_live_footer() {
+        // Codex output quoting the footer, above codex's own live area.
+        let codex = format!(
+            "The footer says Showing detailed transcript · ctrl+o to toggle.\n{CODEX_WORKING}"
+        );
+        let text = split(&codex, &idle_box());
+        assert_eq!(
+            classify(&region(&text, AgentKind::Codex).unwrap()),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn region_claude_box_rules_are_not_window_separators() {
+        // Multi-line prompt: the box's bottom rule isn't right after `❯`.
+        let claude = format!(
+            "✢ Doing… (5s)\n\n{RULE}\n❯ first line\n  second line\n{RULE}\n  ⏵⏵ auto mode on · esc to interrupt"
+        );
+        let text = stacked(&claude, CODEX_IDLE);
+        let claude = region(&text, AgentKind::Claude).unwrap();
+        assert_eq!(classify(&claude), AgentState::Working);
+        assert!(claude.contains("esc to interrupt"));
+        assert_eq!(
+            classify(&region(&text, AgentKind::Codex).unwrap()),
+            AgentState::Idle
+        );
+    }
+
+    #[test]
     fn region_none_when_both_agents_claim_one_region() {
         let both = format!("{}\n{CODEX_WORKING}", idle_box());
         assert!(region(&both, AgentKind::Claude).is_none());
@@ -733,6 +872,17 @@ mod tests {
             &idle_box(),
         );
         assert_eq!(resolve_state(&text, "", "working", None), AgentState::Idle);
+    }
+
+    #[test]
+    fn resolve_holds_transcript_view_beside_editor_split() {
+        // One agent, nvim editor on the left: the footer doesn't start the line.
+        let viewer = "⏺ Earlier answer\n  history\nShowing detailed transcript · ctrl+o to toggle";
+        let text = split("let a = 1;\nlet b = 2;\nlet c = 3;", viewer);
+        assert_eq!(
+            resolve_state(&text, "", "", Some(AgentState::Working)),
+            AgentState::Working
+        );
     }
 
     #[test]

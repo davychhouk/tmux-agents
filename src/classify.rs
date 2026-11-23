@@ -116,7 +116,18 @@ fn is_working(seg: &str) -> bool {
     starts_with(seg, BRAILLE)
         || (starts_with(seg, CLAUDE_GLYPHS) && seg.contains('…'))
         || low.ends_with(INTERRUPT)
-        || low.contains(&format!("{INTERRUPT})"))
+        || timed_interrupt_hint(&low)
+}
+
+/// `(<elapsed> • esc to interrupt)`: the status parenthetical opens with the
+/// turn's timer (`5s`, `1m 05s`). Prose like "(press Esc to interrupt)"
+/// doesn't.
+fn timed_interrupt_hint(low: &str) -> bool {
+    low.match_indices(&format!("{INTERRUPT})")).any(|(end, _)| {
+        low[..end]
+            .rfind('(')
+            .is_some_and(|open| low[open + 1..].starts_with(|c: char| c.is_ascii_digit()))
+    })
 }
 
 /// Claude's live input box: a `❯` line directly under a horizontal rule, in
@@ -577,6 +588,25 @@ mod tests {
     #[test]
     fn working_on_braille_spinner() {
         assert_eq!(classify("⠹ Running tests"), AgentState::Working);
+    }
+
+    #[test]
+    fn idle_on_parenthetical_prose_about_the_interrupt_hint() {
+        let prose = "While working (press Esc to interrupt), Codex displays a timer.";
+        assert_eq!(classify(prose), AgentState::Idle);
+        // ...and it must not block correcting a stale working hook.
+        let text = format!("{prose}\n{}", idle_box());
+        assert_eq!(resolve_state(&text, "", "working", None), AgentState::Idle);
+    }
+
+    #[test]
+    fn working_on_status_parenthetical_with_elapsed_time() {
+        for line in [
+            "Working (1m 05s • esc to interrupt) · /ps to view",
+            "✳ Cerebrating… (12s · ↓ 2.0k tokens · esc to interrupt)",
+        ] {
+            assert_eq!(classify(line), AgentState::Working, "{line}");
+        }
     }
 
     #[test]

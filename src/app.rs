@@ -8,7 +8,7 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::execute;
 use ratatui::widgets::ListState;
 
-use crate::classify::{AgentState, resolve_state};
+use crate::classify::{AgentState, agent_regions, resolve_state};
 use crate::detect::{AgentKind, find_agents, ps_snapshot};
 use crate::{tmux, toggle, ui};
 
@@ -72,14 +72,14 @@ fn record_history(
 /// (hook, screen text, title) to classify one agent of `kinds` (all agents
 /// in its pane) by. The per-kind hook option wins. The shared
 /// `@agent_state` counts when no other agent in the pane could have written
-/// it — they each have their own option. Screen and title count only when
-/// the agent has the pane to itself: with two, they don't say whose state
-/// it is.
+/// it — they each have their own option. In a shared pane the screen is the
+/// agent's own region from `regions` (empty if none) and the title is dropped.
 fn signals<'a>(
     pane: &'a tmux::Pane,
     kind: AgentKind,
     kinds: &[AgentKind],
     text: &'a str,
+    regions: &'a [(AgentKind, String)],
 ) -> (&'a str, &'a str, &'a str) {
     let shared_is_mine = kinds
         .iter()
@@ -91,7 +91,8 @@ fn signals<'a>(
     if kinds.len() == 1 {
         (hook, text, &pane.title)
     } else {
-        (hook, "", "")
+        let region = regions.iter().find(|(k, _)| *k == kind);
+        (hook, region.map_or("", |(_, r)| r), "")
     }
 }
 
@@ -128,10 +129,16 @@ fn refresh(
         if kinds.is_empty() {
             kinds.extend(AgentKind::from_pane_text(&text));
         }
+        // Only shared panes need regions; `signals` ignores them otherwise.
+        let regions = if kinds.len() > 1 {
+            agent_regions(&text)
+        } else {
+            Vec::new()
+        };
         for &kind in &kinds {
             let id = format!("{}/{}", pane.id, kind.label());
             let (raw, state) = evaluate(
-                signals(&pane, kind, &kinds, &text),
+                signals(&pane, kind, &kinds, &text, &regions),
                 prev_states.get(&id).copied(),
                 prev_raw.get(&id).copied(),
             );
@@ -337,11 +344,11 @@ pub(crate) mod tests {
         p.title = "⠹ repo".into();
         p.hook_state = "working".into();
         assert_eq!(
-            signals(&p, Claude, &[Claude], "screen"),
+            signals(&p, Claude, &[Claude], "screen", &[]),
             ("working", "screen", "⠹ repo")
         );
         p.hook_claude = "done".into();
-        assert_eq!(signals(&p, Claude, &[Claude], "screen").0, "done");
+        assert_eq!(signals(&p, Claude, &[Claude], "screen", &[]).0, "done");
     }
 
     #[test]
@@ -351,9 +358,13 @@ pub(crate) mod tests {
         let mut p = pane(1);
         p.title = "⠹ repo".into();
         p.hook_state = "working".into();
-        // Neither has its own option: the shared one could be either's.
-        assert_eq!(signals(&p, Claude, &both, "screen"), ("", "", ""));
-        assert_eq!(signals(&p, Codex, &both, "screen"), ("", "", ""));
+        // Neither has its own option; screen is each agent's region, title dropped.
+        let regions = [(Claude, "claude region".to_string())];
+        assert_eq!(
+            signals(&p, Claude, &both, "pane", &regions),
+            ("", "claude region", "")
+        );
+        assert_eq!(signals(&p, Codex, &both, "pane", &regions), ("", "", ""));
         // No hook, no screen → idle, not the other agent's state.
         assert_eq!(resolve_state("", "", "", None), AgentState::Idle);
     }
@@ -366,8 +377,8 @@ pub(crate) mod tests {
         p.hook_state = "working".into();
         p.hook_codex = "blocked".into();
         // Codex has its own option, so only claude writes the shared one.
-        assert_eq!(signals(&p, Codex, &both, "screen"), ("blocked", "", ""));
-        assert_eq!(signals(&p, Claude, &both, "screen"), ("working", "", ""));
+        assert_eq!(signals(&p, Codex, &both, "", &[]), ("blocked", "", ""));
+        assert_eq!(signals(&p, Claude, &both, "", &[]), ("working", "", ""));
     }
 
     #[test]
@@ -376,12 +387,12 @@ pub(crate) mod tests {
         let mut p = pane(1);
         p.hook_state = "working".into();
         // Claude alone, working.
-        let (mut raw, mut state) = evaluate(signals(&p, Claude, &[Claude], ""), None, None);
+        let (mut raw, mut state) = evaluate(signals(&p, Claude, &[Claude], "", &[]), None, None);
         assert_eq!(state, AgentState::Working);
         // Codex starts in the same pane: claude's signals become unknown.
         for _ in 0..3 {
             (raw, state) = evaluate(
-                signals(&p, Claude, &[Claude, Codex], ""),
+                signals(&p, Claude, &[Claude, Codex], "", &[]),
                 Some(state),
                 Some(raw),
             );

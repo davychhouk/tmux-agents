@@ -1405,6 +1405,7 @@ name = "tmux-agents"
 version = "0.2.0"
 dependencies = [
  "ratatui",
+ "unicode-width",
 ]
 
 [[package]]

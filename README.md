@@ -137,8 +137,8 @@ CI on Linux and macOS.
 
 | module        | tests | covers                                                                                                                                        |
 | ------------- | ----: | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `classify.rs` |    48 | working/blocked/idle from screen text, titles and hook state; screen correcting stale hooks; dialogs, side-by-side splits, transcript view, false positives from quoted text and prose |
-| `detect.rs`   |    14 | finding claude/codex in process trees (direct, nested in nvim, via interpreters, both in one pane, agent run as another's tool), `ps` parsing |
+| `classify.rs` |    59 | working/blocked/idle from screen text, titles and hook state; screen correcting stale hooks; attributing split regions to agents; dialogs, side-by-side splits, transcript view, false positives from quoted text and prose |
+| `detect.rs`   |    15 | finding claude/codex in process trees (direct, nested in nvim, via interpreters, both in one pane, agent run as another's tool), `ps` parsing |
 | `app.rs`      |    11 | done debounce, session grouping, j/k selection skipping headers, selection kept across refreshes, picking each agent's hook in a shared pane |
 | `toggle.rs`   |     4 | finding the sidebar pane, collapse/expand width, default collapsed width per side                                                             |
 | `ui.rs`       |     4 | highlight only while focused, collapsed-mode selection, title cleanup                                                                         |
@@ -170,14 +170,14 @@ Current numbers:
 
 | file          | lines  | functions |
 | ------------- | -----: | --------: |
-| `classify.rs` |  99.3% |    100.0% |
+| `classify.rs` |  99.5% |    100.0% |
 | `ui.rs`       |  94.7% |    100.0% |
-| `detect.rs`   |  92.6% |     96.4% |
-| `app.rs`      |  57.6% |     64.9% |
+| `detect.rs`   |  93.1% |     96.8% |
+| `app.rs`      |  61.1% |     67.5% |
 | `toggle.rs`   |  37.3% |     56.3% |
 | `tmux.rs`     |  39.3% |     35.7% |
 | `main.rs`     |   0.0% |      0.0% |
-| **total**     |  76.4% |     85.1% |
+| **total**     |  79.7% |     87.6% |
 
 The pure logic (state detection, process detection, rendering) is nearly
 fully covered. The low numbers are the tmux side: the event loop, tmux
@@ -250,9 +250,15 @@ nvim): they share `$TMUX_PANE`, so they'd overwrite each other's
 `@agent_state`. Have each write its own option instead,
 `@agent_state_claude` or `@agent_state_codex`. It's enough for one of them
 to switch: the sidebar then knows the shared `@agent_state` belongs to the
-other. Until then, agents sharing a pane show idle rather than each other's
-state. The screen and title can't say which agent they belong to, so they
-only count when an agent has its pane to itself.
+other.
+
+Without per-agent hooks, the screen still works when each agent is visible
+in its own **side-by-side** split (`:vsplit`): the pane is cut at nvim's
+vertical separators and each region is claimed by its agent's prompt line
+(claude's input box or dialog, codex's `›` composer or banner). Agents
+stacked with `:split`, or a split that's hidden or covered (another tab, a
+floating window), give no screen evidence, so those agents show idle rather
+than the other agent's state. The pane title never counts in a shared pane.
 
 | event                                         | state                                         |
 | --------------------------------------------- | --------------------------------------------- |

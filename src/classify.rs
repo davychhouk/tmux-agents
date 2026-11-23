@@ -1,5 +1,9 @@
 use std::collections::HashMap;
 
+use unicode_width::UnicodeWidthChar;
+
+use crate::detect::{AgentKind, is_codex_banner};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentState {
     Working,
@@ -61,28 +65,59 @@ const MIN_RULE_LINES: usize = 3;
 /// diff or a string literal quoting a dialog back at us — is not a rule, and
 /// must not carve out a region that escapes the quote check below.
 fn rule_columns(lines: &[&str]) -> Vec<usize> {
-    let mut counts: HashMap<usize, usize> = HashMap::new();
-    for line in lines {
-        for (col, c) in line.chars().enumerate() {
-            if BORDERS.contains(&c) {
-                *counts.entry(col).or_default() += 1;
-            }
-        }
-    }
-    counts
+    border_counts(lines)
         .into_iter()
         .filter(|&(_, n)| n >= MIN_RULE_LINES)
         .map(|(col, _)| col)
         .collect()
 }
 
+/// Rules spanning most of the screen: split separators, not boxes or tables.
+fn split_columns(lines: &[&str]) -> Vec<usize> {
+    border_counts(lines)
+        .into_iter()
+        .filter(|&(_, n)| n * 4 >= lines.len() * 3)
+        .map(|(col, _)| col)
+        .collect()
+}
+
+fn border_counts(lines: &[&str]) -> HashMap<usize, usize> {
+    let mut counts: HashMap<usize, usize> = HashMap::new();
+    for line in lines {
+        for (col, c) in cells(line) {
+            if BORDERS.contains(&c) {
+                *counts.entry(col).or_default() += 1;
+            }
+        }
+    }
+    counts
+}
+
+/// Chars with their screen column: wide chars (CJK, emoji) take two cells.
+fn cells(line: &str) -> impl Iterator<Item = (usize, char)> + '_ {
+    line.chars().scan(0, |col, c| {
+        let at = *col;
+        *col += c.width().unwrap_or(0);
+        Some((at, c))
+    })
+}
+
 /// The pieces of `line` belonging to distinct on-screen regions. A region
 /// holding a `"` is source or a diff quoting our patterns back at us — live
 /// UI text is never drawn wrapped in quote marks — so it is dropped.
 fn segments(line: &str, rules: &[usize]) -> Vec<String> {
+    // Blank rather than drop, so region indices stay aligned across lines.
+    regions(line, rules)
+        .into_iter()
+        .map(|s| if s.contains('"') { String::new() } else { s })
+        .collect()
+}
+
+/// `line` cut at rule columns and trimmed, quotes kept (typed prompts have them).
+fn regions(line: &str, rules: &[usize]) -> Vec<String> {
     let mut segs = Vec::new();
     let mut cur = String::new();
-    for (col, c) in line.chars().enumerate() {
+    for (col, c) in cells(line) {
         if BORDERS.contains(&c) && rules.contains(&col) {
             segs.push(std::mem::take(&mut cur));
         } else {
@@ -90,16 +125,7 @@ fn segments(line: &str, rules: &[usize]) -> Vec<String> {
         }
     }
     segs.push(cur);
-    // Blank rather than drop, so region indices stay aligned across lines.
-    segs.into_iter()
-        .map(|s| {
-            if s.contains('"') {
-                String::new()
-            } else {
-                s.trim().to_string()
-            }
-        })
-        .collect()
+    segs.into_iter().map(|s| s.trim().to_string()).collect()
 }
 
 fn starts_with(seg: &str, marks: &[char]) -> bool {
@@ -136,12 +162,56 @@ fn timed_interrupt_hint(low: &str) -> bool {
 fn has_input_box(pane_text: &str) -> bool {
     let tail = tail(pane_text);
     let rules = rule_columns(&tail);
-    let rows: Vec<Vec<String>> = tail.iter().map(|l| segments(l, &rules)).collect();
+    let rows: Vec<Vec<String>> = tail.iter().map(|l| regions(l, &rules)).collect();
     rows.windows(2).any(|w| {
         w[0].iter()
             .zip(&w[1])
             .any(|(above, seg)| is_hrule(above) && seg.starts_with('❯'))
     })
+}
+
+/// Each agent's own screen region in a shared pane (nvim splits); agents not uniquely on screen are left out.
+pub fn agent_regions(pane_text: &str) -> Vec<(AgentKind, String)> {
+    let lines: Vec<&str> = pane_text.lines().collect();
+    let cuts = split_columns(&lines);
+    // Raw text: `classify` drops quoted lines itself when it scans the region.
+    let rows: Vec<Vec<String>> = lines.iter().map(|l| regions(l, &cuts)).collect();
+    let width = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let owned: Vec<(AgentKind, String)> = (0..width)
+        .map(|k| {
+            rows.iter()
+                .map(|r| r.get(k).map_or("", String::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter_map(|region| Some((region_owner(&region)?, region)))
+        .collect();
+    owned
+        .iter()
+        .filter(|(kind, _)| owned.iter().filter(|(k, _)| k == kind).count() == 1)
+        .cloned()
+        .collect()
+}
+
+/// Claude: input box or its own `❯` dialog line; codex: `›` composer or banner.
+fn region_owner(region: &str) -> Option<AgentKind> {
+    let lines: Vec<&str> = region.lines().collect();
+    let caret = |l: &&str| l.starts_with('❯');
+    let claude = has_input_box(region)
+        || lines.iter().any(|l| caret(l) && is_blocked(l))
+        || (lines.iter().any(caret) && lines.iter().any(|l| is_select_footer(&l.to_lowercase())));
+    let codex = lines
+        .iter()
+        .any(|l| l.starts_with('›') || is_codex_banner(l));
+    match (claude, codex) {
+        (true, false) => Some(AgentKind::Claude),
+        (false, true) => Some(AgentKind::Codex),
+        _ => None,
+    }
+}
+
+fn is_select_footer(low: &str) -> bool {
+    low.contains("to navigate") && low.contains("enter to select") && low.contains("esc to cancel")
 }
 
 fn is_hrule(seg: &str) -> bool {
@@ -164,10 +234,7 @@ fn tail(pane_text: &str) -> Vec<&str> {
 /// so "yesterday" never matches.
 fn is_blocked(seg: &str) -> bool {
     let low = seg.to_lowercase();
-    if low.contains("to navigate")
-        && low.contains("enter to select")
-        && low.contains("esc to cancel")
-    {
+    if is_select_footer(&low) {
         return true;
     }
     if !starts_with(seg, CARETS) {
@@ -495,14 +562,176 @@ mod tests {
         );
     }
 
+    fn region(text: &str, kind: AgentKind) -> Option<String> {
+        agent_regions(text)
+            .into_iter()
+            .find_map(|(k, r)| (k == kind).then_some(r))
+    }
+
+    /// Two nvim splits side by side, separated by a `│` rule.
+    fn split(left: &str, right: &str) -> String {
+        let (l, r): (Vec<&str>, Vec<&str>) = (left.lines().collect(), right.lines().collect());
+        (0..l.len().max(r.len()))
+            .map(|i| {
+                format!(
+                    "{:<45}│{}",
+                    l.get(i).copied().unwrap_or(""),
+                    r.get(i).copied().unwrap_or("")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    const CODEX_WORKING: &str = "• Ran cargo test\n\nWorking (5s • esc to interrupt)\n\n› Ask Codex to do anything\n\n  ? for shortcuts";
+
     #[test]
-    fn resolve_finds_idle_box_beside_editor_split() {
-        let text = idle_box()
+    fn region_attributes_each_split_to_its_agent() {
+        let text = split(CODEX_WORKING, &idle_box());
+        let claude = region(&text, AgentKind::Claude).unwrap();
+        let codex = region(&text, AgentKind::Codex).unwrap();
+        assert_eq!(classify(&claude), AgentState::Idle);
+        assert_eq!(classify(&codex), AgentState::Working);
+        // The other agent's spinner/footer isn't in this agent's region.
+        assert!(!claude.contains("Working"));
+        assert!(!codex.contains("Cooked"));
+    }
+
+    #[test]
+    fn region_none_when_agent_not_on_screen() {
+        // Codex's buffer hidden; only nvim's dashboard beside claude.
+        let text = split("  Find File   f\n  Quit        q\n\n", &working_box());
+        assert!(region(&text, AgentKind::Codex).is_none());
+        assert!(region(&text, AgentKind::Claude).is_some());
+    }
+
+    #[test]
+    fn region_ignores_shell_prompt_that_looks_like_claude() {
+        // A starship-style `❯` shell prompt isn't claude's input box.
+        let text = split("~/p/repo\n❯ cargo test\n\n", CODEX_WORKING);
+        assert!(region(&text, AgentKind::Claude).is_none());
+        assert!(region(&text, AgentKind::Codex).is_some());
+    }
+
+    #[test]
+    fn region_claims_claude_permission_dialog() {
+        // The dialog replaces claude's input box.
+        let dialog = "Bash command\n\nDo you want to proceed?\n❯ 1. Yes\n  2. No";
+        let text = split(CODEX_WORKING, dialog);
+        let claude = region(&text, AgentKind::Claude).unwrap();
+        assert_eq!(resolve_state(&claude, "", "", None), AgentState::Blocked);
+        // Codex's approval caret is `›`: still codex's, not claude's.
+        let codex_dialog = "Allow command?\n› 1. Yes, proceed (y)\n  2. No (esc)";
+        let text = split(codex_dialog, &idle_box());
+        let codex = region(&text, AgentKind::Codex).unwrap();
+        assert_eq!(classify(&codex), AgentState::Blocked);
+        assert!(region(&text, AgentKind::Claude).is_some());
+    }
+
+    #[test]
+    fn region_claims_claude_question_picker() {
+        // No Yes/No label: the caret plus the dialog footer claim it.
+        let picker = "Which approach?\n  ❯ Option A\n    Option B\n\
+                      ↑/↓ to navigate · Enter to select · Esc to cancel";
+        let text = split(CODEX_WORKING, picker);
+        let claude = region(&text, AgentKind::Claude).unwrap();
+        assert_eq!(resolve_state(&claude, "", "", None), AgentState::Blocked);
+    }
+
+    #[test]
+    fn region_codex_claimed_by_banner_not_by_its_name_in_text() {
+        // Claude's transcript mentioning codex doesn't make the region codex's.
+        let claude = format!("The label is \"OpenAI Codex\".\n{}", working_box());
+        let text = split("~\n~\n~", &claude);
+        let claude = region(&text, AgentKind::Claude).unwrap();
+        assert_eq!(classify(&claude), AgentState::Working);
+        // The real banner (inside its box) still claims codex's region.
+        let banner = "╭──────────────────────────────╮\n\
+                      │ >_ OpenAI Codex (v0.171.0)   │\n\
+                      │ model: gpt-5                 │\n\
+                      ╰──────────────────────────────╯";
+        let text = split(banner, &idle_box());
+        assert!(region(&text, AgentKind::Codex).is_some());
+    }
+
+    #[test]
+    fn region_survives_quotes_typed_in_prompt() {
+        let codex = CODEX_WORKING.replace("Ask Codex to do anything", "explain \"foo\"");
+        let claude = working_box().replace("❯ ", "❯ explain \"foo\"");
+        let text = split(&codex, &claude);
+        let codex = region(&text, AgentKind::Codex).unwrap();
+        let claude = region(&text, AgentKind::Claude).unwrap();
+        assert_eq!(classify(&codex), AgentState::Working);
+        assert_eq!(classify(&claude), AgentState::Working);
+    }
+
+    #[test]
+    fn region_ignores_boxes_that_dont_span_the_split() {
+        // Codex's real banner box: `│` on 4+ lines, but only part of the height.
+        let banner = "╭──────────────────────────────╮\n\
+                      │ >_ OpenAI Codex (v0.171.0)   │\n\
+                      │                              │\n\
+                      │ model: gpt-5                 │\n\
+                      │ directory: ~/p/repo          │\n\
+                      ╰──────────────────────────────╯\n\n\
+                      › Ask Codex to do anything\n\n  ? for shortcuts\n\n\n";
+        let text = split(banner, &idle_box());
+        assert!(region(&text, AgentKind::Codex).is_some());
+        let claude = region(&text, AgentKind::Claude).unwrap();
+        assert_eq!(
+            resolve_state(&claude, "", "working", None),
+            AgentState::Idle
+        );
+        // A table in claude's transcript doesn't cut its region either.
+        let table = format!(
+            "│ a │ b │\n│ 1 │ 2 │\n│ 3 │ 4 │\n│ 5 │ 6 │\n{}",
+            working_box()
+        );
+        let text = split(CODEX_WORKING, &table);
+        let claude = region(&text, AgentKind::Claude).unwrap();
+        assert_eq!(classify(&claude), AgentState::Working);
+    }
+
+    #[test]
+    fn region_split_by_display_width() {
+        // Wide chars left of the separator shift its char index, not its column.
+        let left = "日本語のメモ\n絵文字 🎉\n\n› Ask Codex to do anything\n\n";
+        let text = left
             .lines()
-            .enumerate()
-            .map(|(i, r)| format!("{:<20}│{r}", format!("let x{i} = 1;")))
+            .chain(std::iter::repeat_n("", 2))
+            .zip(idle_box().lines().map(str::to_string).collect::<Vec<_>>())
+            .map(|(l, r)| {
+                let pad = 45 - unicode_width::UnicodeWidthStr::width(l);
+                format!("{l}{}│{r}", " ".repeat(pad))
+            })
             .collect::<Vec<_>>()
             .join("\n");
+        assert!(region(&text, AgentKind::Codex).is_some());
+        assert!(region(&text, AgentKind::Claude).is_some());
+    }
+
+    #[test]
+    fn region_claude_dialog_claim_needs_its_own_dialog_line() {
+        // An old starship `❯` prompt above codex's approval stays codex's.
+        let codex = "~/p/repo\n❯ codex\n\nAllow command?\n› 1. Yes, proceed (y)\n  2. No (esc)";
+        let text = split(codex, &idle_box());
+        let codex = region(&text, AgentKind::Codex).unwrap();
+        assert_eq!(classify(&codex), AgentState::Blocked);
+    }
+
+    #[test]
+    fn region_none_when_both_agents_claim_one_region() {
+        let both = format!("{}\n{CODEX_WORKING}", idle_box());
+        assert!(region(&both, AgentKind::Claude).is_none());
+        assert!(region(&both, AgentKind::Codex).is_none());
+    }
+
+    #[test]
+    fn resolve_finds_idle_box_beside_editor_split() {
+        let text = split(
+            "let x0 = 1;\nlet x1 = 1;\nlet x2 = 1;\nlet x3 = 1;\nlet x4 = 1;\nlet x5 = 1;",
+            &idle_box(),
+        );
         assert_eq!(resolve_state(&text, "", "working", None), AgentState::Idle);
     }
 

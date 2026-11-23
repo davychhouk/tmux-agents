@@ -95,6 +95,22 @@ fn signals<'a>(
     }
 }
 
+/// (raw, displayed) state for one agent from its signals and history.
+/// No signal at all (a shared pane with nothing attributable) is unknown,
+/// not a reading of idle: show idle without the Working→Done flip, or a
+/// second agent starting would mark the first one done.
+fn evaluate(
+    (hook, screen, title): (&str, &str, &str),
+    prev_state: Option<AgentState>,
+    prev_raw: Option<AgentState>,
+) -> (AgentState, AgentState) {
+    if hook.is_empty() && screen.is_empty() && title.is_empty() {
+        return (AgentState::Idle, AgentState::Idle);
+    }
+    let raw = resolve_state(screen, title, hook, prev_raw);
+    (raw, next_state(raw, prev_state, prev_raw))
+}
+
 // ponytail: synchronous fork-per-pane each tick; fine for a handful of agents, batch/async if pane count grows
 fn refresh(
     prev_states: &HashMap<String, AgentState>,
@@ -114,10 +130,8 @@ fn refresh(
         }
         for &kind in &kinds {
             let id = format!("{}/{}", pane.id, kind.label());
-            let (hook, screen, title) = signals(&pane, kind, &kinds, &text);
-            let raw = resolve_state(screen, title, hook, prev_raw.get(&id).copied());
-            let state = next_state(
-                raw,
+            let (raw, state) = evaluate(
+                signals(&pane, kind, &kinds, &text),
                 prev_states.get(&id).copied(),
                 prev_raw.get(&id).copied(),
             );
@@ -354,6 +368,25 @@ pub(crate) mod tests {
         // Codex has its own option, so only claude writes the shared one.
         assert_eq!(signals(&p, Codex, &both, "screen"), ("blocked", "", ""));
         assert_eq!(signals(&p, Claude, &both, "screen"), ("working", "", ""));
+    }
+
+    #[test]
+    fn second_agent_starting_does_not_mark_first_done() {
+        use AgentKind::{Claude, Codex};
+        let mut p = pane(1);
+        p.hook_state = "working".into();
+        // Claude alone, working.
+        let (mut raw, mut state) = evaluate(signals(&p, Claude, &[Claude], ""), None, None);
+        assert_eq!(state, AgentState::Working);
+        // Codex starts in the same pane: claude's signals become unknown.
+        for _ in 0..3 {
+            (raw, state) = evaluate(
+                signals(&p, Claude, &[Claude, Codex], ""),
+                Some(state),
+                Some(raw),
+            );
+            assert_eq!(state, AgentState::Idle);
+        }
     }
 
     #[test]

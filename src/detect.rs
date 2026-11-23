@@ -45,10 +45,17 @@ impl AgentKind {
     }
 
     pub fn from_pane_text(text: &str) -> Option<Self> {
-        text.to_ascii_lowercase()
-            .contains("openai codex")
+        text.lines()
+            .any(is_codex_banner)
             .then_some(AgentKind::Codex)
     }
+}
+
+/// `>_ OpenAI Codex (v0.171.0)`, bare or inside its box border; not the name in other text.
+pub fn is_codex_banner(line: &str) -> bool {
+    line.trim_start_matches(|c: char| c.is_whitespace() || ('\u{2500}'..='\u{257F}').contains(&c))
+        .to_lowercase()
+        .starts_with(">_ openai codex")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,6 +191,18 @@ mod tests {
     fn finds_codex_from_pane_text() {
         assert_eq!(
             AgentKind::from_pane_text(">_ OpenAI Codex (v0.143.0)"),
+            Some(AgentKind::Codex)
+        );
+    }
+
+    #[test]
+    fn codex_name_in_other_text_is_not_its_banner() {
+        assert_eq!(
+            AgentKind::from_pane_text("notes: try OpenAI Codex later"),
+            None
+        );
+        assert_eq!(
+            AgentKind::from_pane_text("│ >_ OpenAI Codex (v0.171.0) │"),
             Some(AgentKind::Codex)
         );
     }

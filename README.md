@@ -22,7 +22,7 @@ Prebuilt binaries are published for macOS and Linux on x86_64 and arm64.
 
 - **Agent detection**: finds claude and codex in any tmux session or window,
   including agents started through `node`/`bun`/shell wrappers or inside nvim
-  terminals.
+  terminals, and both when they share one pane.
 - **Live status**: each agent shows as working (animated spinner), blocked
   (`?`, waiting on you), done (`✓`, finished a task), or idle (`○`).
 - **Accurate state detection**: uses the agent's own hooks when set up, then
@@ -138,8 +138,8 @@ CI on Linux and macOS.
 | module        | tests | covers                                                                                                                                        |
 | ------------- | ----: | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | `classify.rs` |    48 | working/blocked/idle from screen text, titles and hook state; screen correcting stale hooks; dialogs, side-by-side splits, transcript view, false positives from quoted text and prose |
-| `detect.rs`   |    11 | finding claude/codex in process trees (direct, nested in nvim, via interpreters), `ps` parsing                                                |
-| `app.rs`      |     7 | done debounce, session grouping, j/k selection skipping headers, selection kept across refreshes                                              |
+| `detect.rs`   |    14 | finding claude/codex in process trees (direct, nested in nvim, via interpreters, both in one pane, agent run as another's tool), `ps` parsing |
+| `app.rs`      |    11 | done debounce, session grouping, j/k selection skipping headers, selection kept across refreshes, picking each agent's hook in a shared pane |
 | `toggle.rs`   |     4 | finding the sidebar pane, collapse/expand width, default collapsed width per side                                                             |
 | `ui.rs`       |     4 | highlight only while focused, collapsed-mode selection, title cleanup                                                                         |
 | `tmux.rs`     |     2 | parsing `list-panes` output                                                                                                                   |
@@ -170,14 +170,14 @@ Current numbers:
 
 | file          | lines  | functions |
 | ------------- | -----: | --------: |
-| `classify.rs` |  99.2% |    100.0% |
+| `classify.rs` |  99.3% |    100.0% |
 | `ui.rs`       |  94.7% |    100.0% |
-| `detect.rs`   |  91.1% |     96.0% |
-| `app.rs`      |  48.6% |     54.6% |
+| `detect.rs`   |  92.6% |     96.4% |
+| `app.rs`      |  57.6% |     64.9% |
 | `toggle.rs`   |  37.3% |     56.3% |
-| `tmux.rs`     |  34.6% |     30.8% |
+| `tmux.rs`     |  39.3% |     35.7% |
 | `main.rs`     |   0.0% |      0.0% |
-| **total**     |  73.5% |     82.2% |
+| **total**     |  76.4% |     85.1% |
 
 The pure logic (state detection, process detection, rendering) is nearly
 fully covered. The low numbers are the tmux side: the event loop, tmux
@@ -212,8 +212,9 @@ set -g @agents-version 'v0.1.0'
 ## How it works
 
 Polls `tmux list-panes -a`, walks each pane's process tree for claude/codex
-(including inside nvim terminals), falls back to spotting codex's
-"OpenAI Codex" banner on screen, and classifies each pane into
+(including inside nvim terminals; an agent's own child processes are its
+tools, not more agents), falls back to spotting codex's "OpenAI Codex"
+banner on screen, and classifies each agent into
 working / blocked / idle. An agent that goes from working to idle shows as
 done (green) until it starts working again. The switch to done waits for a
 second idle reading, so a brief pause mid-task doesn't flash done.
@@ -243,6 +244,15 @@ Hook command for both claude (`~/.claude/settings.json`) and codex
 ```
 tmux set -p -t "$TMUX_PANE" @agent_state <state> 2>/dev/null; exit 0
 ```
+
+**Running both agents in one pane** (e.g. two terminal buffers in one
+nvim): they share `$TMUX_PANE`, so they'd overwrite each other's
+`@agent_state`. Have each write its own option instead,
+`@agent_state_claude` or `@agent_state_codex`. It's enough for one of them
+to switch: the sidebar then knows the shared `@agent_state` belongs to the
+other. Until then, agents sharing a pane show idle rather than each other's
+state. The screen and title can't say which agent they belong to, so they
+only count when an agent has its pane to itself.
 
 | event                                         | state                                         |
 | --------------------------------------------- | --------------------------------------------- |

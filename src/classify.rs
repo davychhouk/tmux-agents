@@ -358,7 +358,12 @@ fn hook_state(value: &str) -> Option<AgentState> {
 /// nothing on it reflects the turn's real state, so the caller should hold
 /// the last known state while it is up.
 fn is_transcript_view(pane_text: &str) -> bool {
-    tail(pane_text).iter().any(|l| is_transcript_footer(l))
+    // Cut at split rules first: beside an editor the footer doesn't start the line.
+    let tail = tail(pane_text);
+    let rules = rule_columns(&tail);
+    tail.iter()
+        .flat_map(|l| segments(l, &rules))
+        .any(|seg| is_transcript_footer(&seg))
 }
 
 /// `Showing detailed transcript · ctrl+o to toggle`: the viewer's footer, not prose quoting it.
@@ -867,6 +872,17 @@ mod tests {
             &idle_box(),
         );
         assert_eq!(resolve_state(&text, "", "working", None), AgentState::Idle);
+    }
+
+    #[test]
+    fn resolve_holds_transcript_view_beside_editor_split() {
+        // One agent, nvim editor on the left: the footer doesn't start the line.
+        let viewer = "⏺ Earlier answer\n  history\nShowing detailed transcript · ctrl+o to toggle";
+        let text = split("let a = 1;\nlet b = 2;\nlet c = 3;", viewer);
+        assert_eq!(
+            resolve_state(&text, "", "", Some(AgentState::Working)),
+            AgentState::Working
+        );
     }
 
     #[test]

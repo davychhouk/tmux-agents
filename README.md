@@ -137,7 +137,7 @@ CI on Linux and macOS.
 
 | module        | tests | covers                                                                                                                                        |
 | ------------- | ----: | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `classify.rs` |    62 | working/blocked/idle from screen text, titles and hook state; screen correcting stale hooks; attributing split regions to agents; dialogs, side-by-side splits, transcript view, false positives from quoted text and prose |
+| `classify.rs` |    64 | working/blocked/idle from screen text, titles and hook state; screen correcting stale hooks; attributing split regions to agents; dialogs, side-by-side splits, transcript view, false positives from quoted text and prose |
 | `detect.rs`   |    15 | finding claude/codex in process trees (direct, nested in nvim, via interpreters, both in one pane, agent run as another's tool), `ps` parsing |
 | `app.rs`      |    12 | done debounce, session grouping, j/k selection skipping headers, selection kept across refreshes, picking each agent's hook in a shared pane |
 | `toggle.rs`   |     4 | finding the sidebar pane, collapse/expand width, default collapsed width per side                                                             |

@@ -213,15 +213,17 @@ fn is_window_separator(lines: &[&str], i: usize) -> bool {
     if !rule(lines[i]) {
         return false;
     }
-    let opens_prompt = lines.get(i + 1).is_some_and(|l| l.starts_with('❯'));
     // ponytail: prompts taller than 6 lines read as a separator; raise the window if that bites
-    let closes_prompt = lines[..i]
-        .iter()
+    let box_top = |j: usize| {
+        rule(lines[j])
+            && lines.get(j + 1).is_some_and(|l| l.starts_with('❯'))
+            && lines[j + 1..].iter().take(7).any(|l| rule(l))
+    };
+    let closes_box = (i.saturating_sub(7)..i)
         .rev()
-        .take(6)
-        .take_while(|l| !rule(l))
-        .any(|l| l.starts_with('❯'));
-    !opens_prompt && !closes_prompt
+        .find(|&j| rule(lines[j]))
+        .is_some_and(box_top);
+    !box_top(i) && !closes_box
 }
 
 /// Claude: input box, its own `❯` dialog line or transcript footer; codex: `›` composer or banner.
@@ -229,9 +231,8 @@ fn region_owner(region: &str) -> Option<AgentKind> {
     let lines: Vec<&str> = region.lines().collect();
     let caret = |l: &&str| l.starts_with('❯');
     let claude = has_input_box(region)
-        || lines
-            .iter()
-            .any(|l| caret(l) && is_blocked(l) || is_transcript_footer(l))
+        || lines.iter().any(|l| caret(l) && is_blocked(l))
+        || live_footer(&lines).any(|l| is_transcript_footer(l))
         || (lines.iter().any(caret) && lines.iter().any(|l| is_select_footer(&l.to_lowercase())));
     let codex = lines
         .iter()
@@ -360,8 +361,15 @@ fn is_transcript_view(pane_text: &str) -> bool {
     tail(pane_text).iter().any(|l| is_transcript_footer(l))
 }
 
+/// `Showing detailed transcript · ctrl+o to toggle`: the viewer's footer, not prose quoting it.
 fn is_transcript_footer(line: &str) -> bool {
-    !line.contains('"') && line.to_lowercase().contains("showing detailed transcript")
+    let low = line.trim().to_lowercase();
+    !low.contains('"') && low.starts_with("showing detailed transcript") && low.contains("ctrl+o")
+}
+
+/// The last few non-empty lines, where an agent's live footer sits.
+fn live_footer<'a>(lines: &'a [&'a str]) -> impl Iterator<Item = &'a &'a str> {
+    lines.iter().rev().filter(|l| !l.trim().is_empty()).take(3)
 }
 
 fn classify(pane_text: &str) -> AgentState {
@@ -798,6 +806,34 @@ mod tests {
         assert_eq!(
             classify(&region(&text, AgentKind::Claude).unwrap()),
             AgentState::Idle
+        );
+    }
+
+    #[test]
+    fn region_splits_stacked_windows_below_a_dialog() {
+        // Claude's approval dialog (no input box) right above the separator.
+        let dialog = "Bash command\n\nDo you want to proceed?\n❯ 1. Yes\n  2. No";
+        let text = stacked(dialog, CODEX_WORKING);
+        assert_eq!(
+            resolve_state(&region(&text, AgentKind::Claude).unwrap(), "", "", None),
+            AgentState::Blocked
+        );
+        assert_eq!(
+            classify(&region(&text, AgentKind::Codex).unwrap()),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn region_transcript_footer_must_be_the_live_footer() {
+        // Codex output quoting the footer, above codex's own live area.
+        let codex = format!(
+            "The footer says Showing detailed transcript · ctrl+o to toggle.\n{CODEX_WORKING}"
+        );
+        let text = split(&codex, &idle_box());
+        assert_eq!(
+            classify(&region(&text, AgentKind::Codex).unwrap()),
+            AgentState::Working
         );
     }
 

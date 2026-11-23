@@ -178,11 +178,12 @@ pub fn agent_regions(pane_text: &str) -> Vec<(AgentKind, String)> {
     let rows: Vec<Vec<String>> = lines.iter().map(|l| regions(l, &cuts)).collect();
     let width = rows.iter().map(Vec::len).max().unwrap_or(0);
     let owned: Vec<(AgentKind, String)> = (0..width)
-        .map(|k| {
-            rows.iter()
+        .flat_map(|k| {
+            let column: Vec<&str> = rows
+                .iter()
                 .map(|r| r.get(k).map_or("", String::as_str))
-                .collect::<Vec<_>>()
-                .join("\n")
+                .collect();
+            window_bands(&column)
         })
         .filter_map(|region| Some((region_owner(&region)?, region)))
         .collect();
@@ -191,6 +192,36 @@ pub fn agent_regions(pane_text: &str) -> Vec<(AgentKind, String)> {
         .filter(|(kind, _)| owned.iter().filter(|(k, _)| k == kind).count() == 1)
         .cloned()
         .collect()
+}
+
+/// `lines` cut into stacked nvim windows at their separator rows.
+fn window_bands(lines: &[&str]) -> Vec<String> {
+    let mut bands = vec![Vec::new()];
+    for (i, line) in lines.iter().enumerate() {
+        if is_window_separator(lines, i) {
+            bands.push(Vec::new());
+        } else if let Some(band) = bands.last_mut() {
+            band.push(*line);
+        }
+    }
+    bands.into_iter().map(|b| b.join("\n")).collect()
+}
+
+/// A `─` row between stacked windows (`laststatus=3`), not one of claude's input box rules.
+fn is_window_separator(lines: &[&str], i: usize) -> bool {
+    let rule = |l: &str| l.chars().count() >= 10 && l.chars().all(|c| "─┬┴┼├┤".contains(c));
+    if !rule(lines[i]) {
+        return false;
+    }
+    let opens_prompt = lines.get(i + 1).is_some_and(|l| l.starts_with('❯'));
+    // ponytail: prompts taller than 6 lines read as a separator; raise the window if that bites
+    let closes_prompt = lines[..i]
+        .iter()
+        .rev()
+        .take(6)
+        .take_while(|l| !rule(l))
+        .any(|l| l.starts_with('❯'));
+    !opens_prompt && !closes_prompt
 }
 
 /// Claude: input box, its own `❯` dialog line or transcript footer; codex: `›` composer or banner.
@@ -737,6 +768,53 @@ mod tests {
         // Quoted mention of the footer isn't the viewer.
         let quoted = "the footer reads \"Showing detailed transcript\"\n~\n~";
         assert!(region(&split(CODEX_WORKING, quoted), AgentKind::Claude).is_none());
+    }
+
+    /// nvim `:split` with `laststatus=3`: windows stacked, a `─` row between.
+    fn stacked(top: &str, bottom: &str) -> String {
+        format!("{top}\n{}\n{bottom}", "─".repeat(60))
+    }
+
+    const CODEX_IDLE: &str = "• Ran cargo test\n\n› Ask Codex to do anything\n\n  ? for shortcuts";
+
+    #[test]
+    fn region_splits_stacked_windows() {
+        // Claude on top, codex below: claude's footer must not leak down.
+        let text = stacked(&working_box(), CODEX_IDLE);
+        assert_eq!(
+            classify(&region(&text, AgentKind::Claude).unwrap()),
+            AgentState::Working
+        );
+        assert_eq!(
+            classify(&region(&text, AgentKind::Codex).unwrap()),
+            AgentState::Idle
+        );
+        // And the other way round.
+        let text = stacked(CODEX_WORKING, &idle_box());
+        assert_eq!(
+            classify(&region(&text, AgentKind::Codex).unwrap()),
+            AgentState::Working
+        );
+        assert_eq!(
+            classify(&region(&text, AgentKind::Claude).unwrap()),
+            AgentState::Idle
+        );
+    }
+
+    #[test]
+    fn region_claude_box_rules_are_not_window_separators() {
+        // Multi-line prompt: the box's bottom rule isn't right after `❯`.
+        let claude = format!(
+            "✢ Doing… (5s)\n\n{RULE}\n❯ first line\n  second line\n{RULE}\n  ⏵⏵ auto mode on · esc to interrupt"
+        );
+        let text = stacked(&claude, CODEX_IDLE);
+        let claude = region(&text, AgentKind::Claude).unwrap();
+        assert_eq!(classify(&claude), AgentState::Working);
+        assert!(claude.contains("esc to interrupt"));
+        assert_eq!(
+            classify(&region(&text, AgentKind::Codex).unwrap()),
+            AgentState::Idle
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@ use ratatui::crossterm::execute;
 use ratatui::widgets::ListState;
 
 use crate::classify::{AgentState, resolve_state};
-use crate::detect::{AgentKind, find_agent, ps_snapshot};
+use crate::detect::{AgentKind, find_agents, ps_snapshot};
 use crate::{tmux, toggle, ui};
 
 /// Cap on how long the Working→Done debounce (see `next_state`) can lag a
@@ -19,6 +19,8 @@ use crate::{tmux, toggle, ui};
 const CONFIRM_INTERVAL: Duration = Duration::from_secs(2);
 
 pub struct Agent {
+    /// Pane id + kind: a pane can host more than one agent.
+    pub id: String,
     pub pane: tmux::Pane,
     pub kind: AgentKind,
     pub state: AgentState,
@@ -62,8 +64,34 @@ fn record_history(
     agents: &[Agent],
 ) {
     for a in agents {
-        states.insert(a.pane.id.clone(), a.state);
-        raw.insert(a.pane.id.clone(), a.raw);
+        states.insert(a.id.clone(), a.state);
+        raw.insert(a.id.clone(), a.raw);
+    }
+}
+
+/// (hook, screen text, title) to classify one agent of `kinds` (all agents
+/// in its pane) by. The per-kind hook option wins. The shared
+/// `@agent_state` counts when no other agent in the pane could have written
+/// it — they each have their own option. Screen and title count only when
+/// the agent has the pane to itself: with two, they don't say whose state
+/// it is.
+fn signals<'a>(
+    pane: &'a tmux::Pane,
+    kind: AgentKind,
+    kinds: &[AgentKind],
+    text: &'a str,
+) -> (&'a str, &'a str, &'a str) {
+    let shared_is_mine = kinds
+        .iter()
+        .all(|&k| k == kind || !pane.kind_hook(k).is_empty());
+    let hook = match pane.kind_hook(kind) {
+        "" if shared_is_mine => pane.hook_state.as_str(),
+        h => h,
+    };
+    if kinds.len() == 1 {
+        (hook, text, &pane.title)
+    } else {
+        (hook, "", "")
     }
 }
 
@@ -75,31 +103,34 @@ fn refresh(
     let panes = tmux::list_panes()?;
     let procs = ps_snapshot()?;
     let own = std::env::var("TMUX_PANE").unwrap_or_default();
-    let mut agents: Vec<Agent> = panes
-        .into_iter()
-        .filter(|p| p.id != own)
-        .filter_map(|pane| {
-            let text = tmux::capture(&pane.id).ok()?;
-            let kind = find_agent(&procs, pane.pid).or_else(|| AgentKind::from_pane_text(&text))?;
-            let raw = resolve_state(
-                &text,
-                &pane.title,
-                &pane.hook_state,
-                prev_raw.get(&pane.id).copied(),
-            );
+    let mut agents = Vec::new();
+    for pane in panes.into_iter().filter(|p| p.id != own) {
+        let Ok(text) = tmux::capture(&pane.id) else {
+            continue;
+        };
+        let mut kinds = find_agents(&procs, pane.pid);
+        if kinds.is_empty() {
+            kinds.extend(AgentKind::from_pane_text(&text));
+        }
+        for &kind in &kinds {
+            let id = format!("{}/{}", pane.id, kind.label());
+            let (hook, screen, title) = signals(&pane, kind, &kinds, &text);
+            let raw = resolve_state(screen, title, hook, prev_raw.get(&id).copied());
             let state = next_state(
                 raw,
-                prev_states.get(&pane.id).copied(),
-                prev_raw.get(&pane.id).copied(),
+                prev_states.get(&id).copied(),
+                prev_raw.get(&id).copied(),
             );
-            Some(Agent {
-                pane,
+            agents.push(Agent {
+                id,
+                pane: pane.clone(),
                 kind,
                 state,
                 raw,
-            })
-        })
-        .collect();
+            });
+        }
+    }
+    // Stable: agents sharing a pane keep find_agents' order.
     agents.sort_by(|a, b| {
         (&a.pane.session, a.pane.window_index).cmp(&(&b.pane.session, b.pane.window_index))
     });
@@ -136,9 +167,9 @@ fn next_agent_row(rows: &[Row], from: Option<usize>, dir: i32) -> Option<usize> 
     agent_rows.get(next).copied()
 }
 
-fn row_for_pane(rows: &[Row], agents: &[Agent], pane_id: &str) -> Option<usize> {
+fn row_for_agent(rows: &[Row], agents: &[Agent], id: &str) -> Option<usize> {
     rows.iter()
-        .position(|r| matches!(r, Row::Agent(i) if agents[*i].pane.id == pane_id))
+        .position(|r| matches!(r, Row::Agent(i) if agents[*i].id == id))
 }
 
 fn select_own_window(rows: &[Row], agents: &[Agent], list_state: &mut ListState) {
@@ -147,7 +178,7 @@ fn select_own_window(rows: &[Row], agents: &[Agent], list_state: &mut ListState)
             .iter()
             .find(|a| a.pane.session == session && a.pane.window_index == window)
     {
-        list_state.select(row_for_pane(rows, agents, &a.pane.id));
+        list_state.select(row_for_agent(rows, agents, &a.id));
     }
 }
 
@@ -233,17 +264,17 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, interval: Duration) -> io
         }
 
         if last_tick.elapsed() >= refresh_interval {
-            let selected_pane = match list_state.selected().and_then(|s| rows.get(s)) {
-                Some(Row::Agent(i)) => Some(agents[*i].pane.id.clone()),
+            let selected = match list_state.selected().and_then(|s| rows.get(s)) {
+                Some(Row::Agent(i)) => Some(agents[*i].id.clone()),
                 _ => None,
             };
             record_history(&mut prev_states, &mut prev_raw, &agents);
             // Server gone → refresh errors → exit cleanly.
             agents = refresh(&prev_states, &prev_raw)?;
             rows = build_rows(&agents);
-            if let Some(id) = selected_pane {
+            if let Some(id) = selected {
                 list_state.select(
-                    row_for_pane(&rows, &agents, &id).or_else(|| next_agent_row(&rows, None, 1)),
+                    row_for_agent(&rows, &agents, &id).or_else(|| next_agent_row(&rows, None, 1)),
                 );
             }
             last_tick = Instant::now();
@@ -258,21 +289,71 @@ pub(crate) mod tests {
     use crate::detect::AgentKind;
     use crate::tmux::Pane;
 
+    fn pane(window: u32) -> Pane {
+        Pane {
+            session: "s".into(),
+            window_index: window,
+            window_name: format!("w{window}"),
+            id: format!("%{window}"),
+            pid: 100 + window,
+            title: String::new(),
+            hook_state: String::new(),
+            hook_claude: String::new(),
+            hook_codex: String::new(),
+        }
+    }
+
     pub(crate) fn agent(session: &str, window: u32) -> Agent {
         Agent {
+            id: format!("%{window}/claude"),
             pane: Pane {
                 session: session.into(),
-                window_index: window,
-                window_name: format!("w{window}"),
-                id: format!("%{window}"),
-                pid: 100 + window,
-                title: String::new(),
-                hook_state: String::new(),
+                ..pane(window)
             },
             kind: AgentKind::Claude,
             state: AgentState::Idle,
             raw: AgentState::Idle,
         }
+    }
+
+    #[test]
+    fn lone_agent_uses_kind_hook_then_shared_hook_and_screen() {
+        use AgentKind::Claude;
+        let mut p = pane(1);
+        p.title = "⠹ repo".into();
+        p.hook_state = "working".into();
+        assert_eq!(
+            signals(&p, Claude, &[Claude], "screen"),
+            ("working", "screen", "⠹ repo")
+        );
+        p.hook_claude = "done".into();
+        assert_eq!(signals(&p, Claude, &[Claude], "screen").0, "done");
+    }
+
+    #[test]
+    fn shared_pane_never_borrows_another_agents_state() {
+        use AgentKind::{Claude, Codex};
+        let both = [Claude, Codex];
+        let mut p = pane(1);
+        p.title = "⠹ repo".into();
+        p.hook_state = "working".into();
+        // Neither has its own option: the shared one could be either's.
+        assert_eq!(signals(&p, Claude, &both, "screen"), ("", "", ""));
+        assert_eq!(signals(&p, Codex, &both, "screen"), ("", "", ""));
+        // No hook, no screen → idle, not the other agent's state.
+        assert_eq!(resolve_state("", "", "", None), AgentState::Idle);
+    }
+
+    #[test]
+    fn shared_pane_attributes_shared_hook_by_elimination() {
+        use AgentKind::{Claude, Codex};
+        let both = [Claude, Codex];
+        let mut p = pane(1);
+        p.hook_state = "working".into();
+        p.hook_codex = "blocked".into();
+        // Codex has its own option, so only claude writes the shared one.
+        assert_eq!(signals(&p, Codex, &both, "screen"), ("blocked", "", ""));
+        assert_eq!(signals(&p, Claude, &both, "screen"), ("working", "", ""));
     }
 
     #[test]
@@ -315,7 +396,11 @@ pub(crate) mod tests {
         // Reappears reading Idle: still held as Working (blip), not reset
         // to a fresh Idle with no history.
         assert_eq!(
-            next_state(Idle, states.get("%1").copied(), raw.get("%1").copied()),
+            next_state(
+                Idle,
+                states.get("%1/claude").copied(),
+                raw.get("%1/claude").copied()
+            ),
             Working
         );
     }
@@ -358,13 +443,13 @@ pub(crate) mod tests {
         let before = vec![agent("a", 1), agent("b", 2)];
         let rows = build_rows(&before); // a-hdr, a:1, b-hdr, b:2
         let selected_id = match rows[3] {
-            Row::Agent(i) => before[i].pane.id.clone(),
+            Row::Agent(i) => before[i].id.clone(),
             Row::Header(_) => unreachable!(),
         };
         let after = vec![agent("b", 2)];
         let rows = build_rows(&after); // b-hdr, b:2
-        assert_eq!(row_for_pane(&rows, &after, &selected_id), Some(1));
+        assert_eq!(row_for_agent(&rows, &after, &selected_id), Some(1));
         // Selected pane gone entirely → no row.
-        assert_eq!(row_for_pane(&rows, &after, "%99"), None);
+        assert_eq!(row_for_agent(&rows, &after, "%99/claude"), None);
     }
 }

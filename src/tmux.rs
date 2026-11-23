@@ -1,6 +1,8 @@
 use std::io;
 use std::process::Command;
 
+use crate::detect::AgentKind;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pane {
     pub session: String,
@@ -12,6 +14,19 @@ pub struct Pane {
     /// `@agent_state` pane option, pushed by agent lifecycle hooks.
     /// Empty when no hook has written it.
     pub hook_state: String,
+    /// Per-agent `@agent_state_claude` / `@agent_state_codex`, for panes
+    /// running both agents (they share `$TMUX_PANE`, so one option collides).
+    pub hook_claude: String,
+    pub hook_codex: String,
+}
+
+impl Pane {
+    pub fn kind_hook(&self, kind: AgentKind) -> &str {
+        match kind {
+            AgentKind::Claude => &self.hook_claude,
+            AgentKind::Codex => &self.hook_codex,
+        }
+    }
 }
 
 /// Run tmux, return stdout. Err if tmux exits nonzero (e.g. server gone).
@@ -30,7 +45,7 @@ pub fn list_panes() -> io::Result<Vec<Pane>> {
         "list-panes",
         "-a",
         "-F",
-        "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_id}\t#{pane_pid}\t#{pane_title}\t#{@agent_state}",
+        "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_id}\t#{pane_pid}\t#{pane_title}\t#{@agent_state}\t#{@agent_state_claude}\t#{@agent_state_codex}",
     ])?;
     Ok(parse_panes(&out))
 }
@@ -47,6 +62,8 @@ fn parse_panes(out: &str) -> Vec<Pane> {
                 pid,
                 title,
                 hook_state,
+                hook_claude,
+                hook_codex,
             ] = f.as_slice()
             else {
                 return None;
@@ -59,6 +76,8 @@ fn parse_panes(out: &str) -> Vec<Pane> {
                 pid: pid.parse().ok()?,
                 title: title.to_string(),
                 hook_state: hook_state.to_string(),
+                hook_claude: hook_claude.to_string(),
+                hook_codex: hook_codex.to_string(),
             })
         })
         .collect()
@@ -156,8 +175,7 @@ mod tests {
 
     #[test]
     fn parses_pane_lines() {
-        let out =
-            "work\t1\tapi server\t%3\t4242\tmy title\tworking\nwork\t2\tshell\t%7\t4300\thost\t\n";
+        let out = "work\t1\tapi server\t%3\t4242\tmy title\tworking\t\tdone\nwork\t2\tshell\t%7\t4300\thost\t\t\t\n";
         let panes = parse_panes(out);
         assert_eq!(panes.len(), 2);
         assert_eq!(
@@ -170,6 +188,8 @@ mod tests {
                 pid: 4242,
                 title: "my title".into(),
                 hook_state: "working".into(),
+                hook_claude: String::new(),
+                hook_codex: "done".into(),
             }
         );
         assert_eq!(panes[1].hook_state, "");

@@ -1,6 +1,6 @@
 use std::process::Command;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AgentKind {
     Claude,
     Codex,
@@ -82,8 +82,11 @@ fn parse_ps(out: &str) -> Vec<Proc> {
         .collect()
 }
 
-/// First claude/codex found at `root` or in its descendant tree (DFS).
-pub fn find_agent(procs: &[Proc], root: u32) -> Option<AgentKind> {
+/// Every agent kind at `root` or below, e.g. claude and codex as two
+/// terminal buffers in one nvim. An agent's own descendants are its tools
+/// (claude running `codex exec`), so the walk stops at each agent.
+pub fn find_agents(procs: &[Proc], root: u32) -> Vec<AgentKind> {
+    let mut found = Vec::new();
     let mut queue = vec![root];
     while let Some(pid) = queue.pop() {
         if let Some(kind) = procs
@@ -91,11 +94,14 @@ pub fn find_agent(procs: &[Proc], root: u32) -> Option<AgentKind> {
             .find(|p| p.pid == pid)
             .and_then(|p| AgentKind::from_command(&p.command))
         {
-            return Some(kind);
+            found.push(kind);
+            continue;
         }
         queue.extend(procs.iter().filter(|p| p.ppid == pid).map(|p| p.pid));
     }
-    None
+    found.sort_unstable();
+    found.dedup();
+    found
 }
 
 #[cfg(test)]
@@ -113,13 +119,13 @@ mod tests {
     #[test]
     fn finds_agent_as_pane_root() {
         let procs = vec![p(10, 1, "codex")];
-        assert_eq!(find_agent(&procs, 10), Some(AgentKind::Codex));
+        assert_eq!(find_agents(&procs, 10), [AgentKind::Codex]);
     }
 
     #[test]
     fn finds_direct_child() {
         let procs = vec![p(10, 1, "-fish"), p(20, 10, "claude")];
-        assert_eq!(find_agent(&procs, 10), Some(AgentKind::Claude));
+        assert_eq!(find_agents(&procs, 10), [AgentKind::Claude]);
     }
 
     #[test]
@@ -130,13 +136,48 @@ mod tests {
             p(30, 20, "/bin/fish -c codex"),
             p(40, 30, "codex --model gpt-5"),
         ];
-        assert_eq!(find_agent(&procs, 10), Some(AgentKind::Codex));
+        assert_eq!(find_agents(&procs, 10), [AgentKind::Codex]);
+    }
+
+    #[test]
+    fn finds_every_agent_sharing_a_pane() {
+        // claude and codex as two terminal buffers in one nvim.
+        let procs = vec![
+            p(10, 1, "-fish"),
+            p(20, 10, "nvim"),
+            p(21, 20, "nvim --embed"),
+            p(30, 21, "/nix/store/x/libexec/claude"),
+            p(31, 21, "/nix/store/y/libexec/bin/codex"),
+        ];
+        assert_eq!(
+            find_agents(&procs, 10),
+            [AgentKind::Claude, AgentKind::Codex]
+        );
+    }
+
+    #[test]
+    fn agent_run_by_another_agent_is_its_tool() {
+        // claude running `codex exec` from its Bash tool isn't a second agent.
+        let procs = vec![
+            p(10, 1, "fish"),
+            p(20, 10, "claude"),
+            p(30, 20, "zsh -c codex exec 'review'"),
+            p(40, 30, "codex exec review"),
+        ];
+        assert_eq!(find_agents(&procs, 10), [AgentKind::Claude]);
+    }
+
+    #[test]
+    fn same_kind_twice_in_a_pane_is_one_agent() {
+        // Both would write the same per-kind hook option; one row.
+        let procs = vec![p(10, 1, "nvim"), p(20, 10, "claude"), p(21, 10, "claude")];
+        assert_eq!(find_agents(&procs, 10), [AgentKind::Claude]);
     }
 
     #[test]
     fn matches_path_basename() {
         let procs = vec![p(10, 1, "fish"), p(20, 10, "node /Users/x/.bun/bin/claude")];
-        assert_eq!(find_agent(&procs, 10), Some(AgentKind::Claude));
+        assert_eq!(find_agents(&procs, 10), [AgentKind::Claude]);
     }
 
     #[test]
@@ -150,7 +191,7 @@ mod tests {
     #[test]
     fn no_agent() {
         let procs = vec![p(10, 1, "-fish"), p(20, 10, "vim notes.md")];
-        assert_eq!(find_agent(&procs, 10), None);
+        assert_eq!(find_agents(&procs, 10), []);
     }
 
     #[test]
@@ -159,14 +200,14 @@ mod tests {
             p(10, 1, "fish"),
             p(20, 10, "node --enable-source-maps /path/to/claude"),
         ];
-        assert_eq!(find_agent(&procs, 10), Some(AgentKind::Claude));
+        assert_eq!(find_agents(&procs, 10), [AgentKind::Claude]);
     }
 
     #[test]
     fn matches_inline_command_flag() {
         // `bash -lc claude`: claude is bash's -c command string, not a path.
         let procs = vec![p(10, 1, "fish"), p(20, 10, "bash -lc claude")];
-        assert_eq!(find_agent(&procs, 10), Some(AgentKind::Claude));
+        assert_eq!(find_agents(&procs, 10), [AgentKind::Claude]);
     }
 
     #[test]
@@ -174,13 +215,13 @@ mod tests {
         // "codex"/"claude" as a plain argument (not argv0, not an
         // interpreter's script path) must not match.
         let procs = vec![p(10, 1, "fish"), p(20, 10, "cp draft.md codex")];
-        assert_eq!(find_agent(&procs, 10), None);
+        assert_eq!(find_agents(&procs, 10), []);
     }
 
     #[test]
     fn ignores_other_subtrees() {
         let procs = vec![p(10, 1, "fish"), p(11, 1, "fish"), p(20, 11, "claude")];
-        assert_eq!(find_agent(&procs, 10), None);
+        assert_eq!(find_agents(&procs, 10), []);
     }
 
     #[test]

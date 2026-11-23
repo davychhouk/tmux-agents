@@ -137,7 +137,7 @@ CI on Linux and macOS.
 
 | module        | tests | covers                                                                                                                                        |
 | ------------- | ----: | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `classify.rs` |    36 | working/blocked/idle from screen text, titles and hook state; dialogs, side-by-side splits, transcript view, false positives from quoted text |
+| `classify.rs` |    43 | working/blocked/idle from screen text, titles and hook state; screen correcting stale hooks; dialogs, side-by-side splits, transcript view, false positives from quoted text and prose |
 | `detect.rs`   |    11 | finding claude/codex in process trees (direct, nested in nvim, via interpreters), `ps` parsing                                                |
 | `app.rs`      |     7 | done debounce, session grouping, j/k selection skipping headers, selection kept across refreshes                                              |
 | `toggle.rs`   |     4 | finding the sidebar pane, collapse/expand width, default collapsed width per side                                                             |
@@ -166,18 +166,18 @@ Without rustup (e.g. a Nix toolchain), point it at a matching LLVM:
 `nix shell nixpkgs#cargo-llvm-cov nixpkgs#rustc.llvm`, then set `LLVM_COV`
 and `LLVM_PROFDATA` to the `llvm-cov` and `llvm-profdata` on `PATH`.
 
-As of v0.2.0:
+Current numbers:
 
 | file          | lines  | functions |
 | ------------- | -----: | --------: |
-| `classify.rs` |  99.0% |    100.0% |
+| `classify.rs` |  99.2% |    100.0% |
 | `ui.rs`       |  94.7% |    100.0% |
 | `detect.rs`   |  91.1% |     96.0% |
 | `app.rs`      |  48.6% |     54.6% |
 | `toggle.rs`   |  37.3% |     56.3% |
 | `tmux.rs`     |  34.6% |     30.8% |
 | `main.rs`     |   0.0% |      0.0% |
-| **total**     |  71.8% |     80.4% |
+| **total**     |  73.5% |     82.2% |
 
 The pure logic (state detection, process detection, rendering) is nearly
 fully covered. The low numbers are the tmux side: the event loop, tmux
@@ -234,20 +234,34 @@ Per pane, signals are consulted in order:
 
 Have the agents report state themselves by setting the `@agent_state` pane
 option (`working` | `blocked` | `idle` | `done`; unset it to fall back to
-scraping). Hook command for both claude (`~/.claude/settings.json`) and
-codex (`~/.codex/hooks.json`):
+scraping). Strongly recommended when agents run inside nvim: the terminal
+title never reaches tmux there, so hooks and the screen are the only signals.
+
+Hook command for both claude (`~/.claude/settings.json`) and codex
+(`~/.codex/hooks.json`):
 
 ```
 tmux set -p -t "$TMUX_PANE" @agent_state <state> 2>/dev/null; exit 0
 ```
 
-Map `UserPromptSubmit`/`PreToolUse` → `working`, `Stop` → `done`,
-`SessionStart` → `idle`, and (claude) `Notification` with a permission
-message → `blocked`:
+| event                                         | state                                         |
+| --------------------------------------------- | --------------------------------------------- |
+| `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `working`                                     |
+| `Stop`                                        | `done`                                        |
+| `SessionStart`                                | `idle`                                        |
+| `SessionEnd`                                  | unset: `tmux set -p -u -t "$TMUX_PANE" @agent_state` |
+| `PermissionRequest` (claude)                  | `blocked`                                     |
+| `Interrupt` (codex)                           | `idle`                                        |
 
-```
-grep -qi permission && tmux set -p -t "$TMUX_PANE" @agent_state blocked 2>/dev/null; exit 0
-```
+`PostToolUse` clears `blocked` once an approved tool runs. Use claude's
+`PermissionRequest` rather than its `Notification` hook: the permission
+notification only fires after about 6 seconds without typing.
+
+Hooks can go stale (claude skips `Stop` when you interrupt with Esc), so the
+screen still corrects them when it's clear: a dialog on screen means blocked,
+visible work clears a stale blocked, and claude's empty input box with no
+work showing clears a stale working or blocked. When the agent isn't visible
+(e.g. a hidden nvim buffer), the hook is trusted as is.
 
 ## License
 

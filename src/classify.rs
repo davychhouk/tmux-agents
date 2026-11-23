@@ -90,11 +90,16 @@ fn segments(line: &str, rules: &[usize]) -> Vec<String> {
         }
     }
     segs.push(cur);
-    segs.retain(|s| !s.contains('"'));
-    for s in &mut segs {
-        *s = s.trim().to_string();
-    }
-    segs
+    // Blank rather than drop, so region indices stay aligned across lines.
+    segs.into_iter()
+        .map(|s| {
+            if s.contains('"') {
+                String::new()
+            } else {
+                s.trim().to_string()
+            }
+        })
+        .collect()
 }
 
 fn starts_with(seg: &str, marks: &[char]) -> bool {
@@ -102,12 +107,37 @@ fn starts_with(seg: &str, marks: &[char]) -> bool {
 }
 
 /// A spinner leads its region; a glyph inside running text is prose or code.
-/// The interrupt hint needs no anchor — it only ever appears while a turn is
-/// live, and quoted mentions of it are already dropped with their region.
+/// The interrupt hint ends its footer line (`… · esc to interrupt`,
+/// `(12s · esc to interrupt)`); mid-line it's prose talking about it.
 fn is_working(seg: &str) -> bool {
+    let low = seg.to_lowercase();
     starts_with(seg, BRAILLE)
         || (starts_with(seg, CLAUDE_GLYPHS) && seg.contains('…'))
-        || seg.to_lowercase().contains(INTERRUPT)
+        || low.ends_with(INTERRUPT)
+        || low.ends_with(&format!("{INTERRUPT})"))
+}
+
+/// Claude's live input box: a `❯` line directly under a horizontal rule, in
+/// the same screen region. Proves the agent's UI is visible, so a missing
+/// working signal really means idle — not "agent buffer out of view".
+fn has_input_box(pane_text: &str) -> bool {
+    let tail = tail(pane_text);
+    let rules = rule_columns(&tail);
+    let rows: Vec<Vec<String>> = tail.iter().map(|l| segments(l, &rules)).collect();
+    rows.windows(2).any(|w| {
+        w[0].iter()
+            .zip(&w[1])
+            .any(|(above, seg)| is_hrule(above) && seg.starts_with('❯'))
+    })
+}
+
+fn is_hrule(seg: &str) -> bool {
+    seg.chars().count() >= 10 && seg.chars().all(|c| c == '─')
+}
+
+fn tail(pane_text: &str) -> Vec<&str> {
+    let lines: Vec<&str> = pane_text.lines().collect();
+    lines[lines.len().saturating_sub(TAIL_LINES)..].to_vec()
 }
 
 /// A live dialog. Either the footer of a select dialog (question picker,
@@ -159,29 +189,31 @@ fn classify_pane(pane_text: &str, title: &str) -> AgentState {
 /// Full per-pane state decision, combining every signal in priority order.
 ///
 /// `hook` is the `@agent_state` pane option written by the agent's own
-/// lifecycle hooks — ground truth when present, except a live dialog on
-/// screen outranks a non-blocked reading: some dialogs (question pickers)
-/// emit no hook event, so the last hook write still says working. That
-/// override uses the screen-only classifier — the title spinner can keep
-/// running through a mid-turn dialog, and the title-prioritized one would
-/// let it mask the dialog.
+/// lifecycle hooks — trusted unless the screen clearly contradicts it:
+/// - a live dialog outranks any non-blocked reading: some dialogs (question
+///   pickers) emit no hook event;
+/// - a stale blocked yields to visible work: nothing resets the hook once the
+///   prompt is approved;
+/// - a stale working/blocked yields to the idle input box: claude skips its
+///   Stop hook when the user interrupts with Esc.
+///
+/// Overrides use the screen-only classifier — the title spinner can keep
+/// running through a mid-turn dialog and would mask it.
 ///
 /// Without a hook, the screen+title classifier decides, holding `held`
 /// (the previous reading) while claude's transcript viewer replaces the
 /// live screen with history.
 pub fn resolve_state(text: &str, title: &str, hook: &str, held: Option<AgentState>) -> AgentState {
+    use AgentState::{Blocked, Idle, Working};
     match hook_state(hook) {
-        Some(state) => {
-            if state != AgentState::Blocked
-                && !is_transcript_view(text)
-                && classify(text) == AgentState::Blocked
-            {
-                AgentState::Blocked
-            } else {
-                state
-            }
-        }
-        None if is_transcript_view(text) => held.unwrap_or(AgentState::Idle),
+        Some(state) if is_transcript_view(text) => state,
+        Some(state) => match (state, classify(text)) {
+            (_, Blocked) => Blocked,
+            (Blocked, Working) => Working,
+            (Working | Blocked, Idle) if has_input_box(text) => Idle,
+            (state, _) => state,
+        },
+        None if is_transcript_view(text) => held.unwrap_or(Idle),
         None => classify_pane(text, title),
     }
 }
@@ -204,16 +236,14 @@ fn hook_state(value: &str) -> Option<AgentState> {
 /// nothing on it reflects the turn's real state, so the caller should hold
 /// the last known state while it is up.
 fn is_transcript_view(pane_text: &str) -> bool {
-    let lines: Vec<&str> = pane_text.lines().collect();
-    let tail = &lines[lines.len().saturating_sub(TAIL_LINES)..];
-    tail.iter()
+    tail(pane_text)
+        .iter()
         .any(|l| !l.contains('"') && l.to_lowercase().contains("showing detailed transcript"))
 }
 
 fn classify(pane_text: &str) -> AgentState {
-    let lines: Vec<&str> = pane_text.lines().collect();
-    let tail = &lines[lines.len().saturating_sub(TAIL_LINES)..];
-    let rules = rule_columns(tail);
+    let tail = tail(pane_text);
+    let rules = rule_columns(&tail);
     let segs: Vec<String> = tail.iter().flat_map(|l| segments(l, &rules)).collect();
 
     if segs.iter().any(|s| is_blocked(s)) {
@@ -336,6 +366,92 @@ mod tests {
         );
     }
 
+    const RULE: &str = "────────────────────";
+    /// Claude's live input box after a finished or interrupted turn.
+    fn idle_box() -> String {
+        format!("✻ Cooked for 12s\n\n{RULE}\n❯ \n{RULE}\n  ⏵⏵ auto mode on (shift+tab to cycle)")
+    }
+    /// The same box mid-turn: spinner line plus the interrupt footer.
+    fn working_box() -> String {
+        format!(
+            "✢ Doing… (1m 5s)\n\n{RULE}\n❯ \n{RULE}\n  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt"
+        )
+    }
+
+    #[test]
+    fn resolve_interrupted_turn_reads_idle_despite_working_hook() {
+        // Esc skips claude's Stop hook, so the hook still says working.
+        assert_eq!(
+            resolve_state(&idle_box(), "", "working", None),
+            AgentState::Idle
+        );
+    }
+
+    #[test]
+    fn resolve_keeps_working_hook_while_screen_shows_work() {
+        assert_eq!(
+            resolve_state(&working_box(), "", "working", None),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn resolve_trusts_hook_when_agent_ui_not_visible() {
+        // Agent buffer hidden (e.g. another nvim tab): no input box, so a
+        // missing working signal proves nothing.
+        assert_eq!(
+            resolve_state("fn main() {}\n~\n~", "", "working", None),
+            AgentState::Working
+        );
+        // A past prompt in the transcript isn't the live box.
+        assert_eq!(
+            resolve_state("❯ fix the bug\n\nDone.", "", "working", None),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn resolve_clears_stale_blocked_hook() {
+        // Approved: the tool runs, but nothing reset the hook yet.
+        assert_eq!(
+            resolve_state(&working_box(), "", "blocked", None),
+            AgentState::Working
+        );
+        // Dialog dismissed with Esc: no Stop hook either.
+        assert_eq!(
+            resolve_state(&idle_box(), "", "blocked", None),
+            AgentState::Idle
+        );
+        // Dialog still up: stays blocked.
+        assert_eq!(
+            resolve_state("Do you want to proceed?\n❯ 1. Yes", "", "blocked", None),
+            AgentState::Blocked
+        );
+    }
+
+    #[test]
+    fn resolve_keeps_done_and_idle_hooks_over_idle_box() {
+        assert_eq!(
+            resolve_state(&idle_box(), "", "done", None),
+            AgentState::Done
+        );
+        assert_eq!(
+            resolve_state(&idle_box(), "", "idle", None),
+            AgentState::Idle
+        );
+    }
+
+    #[test]
+    fn resolve_finds_idle_box_beside_editor_split() {
+        let text = idle_box()
+            .lines()
+            .enumerate()
+            .map(|(i, r)| format!("{:<20}│{r}", format!("let x{i} = 1;")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(resolve_state(&text, "", "working", None), AgentState::Idle);
+    }
+
     #[test]
     fn resolve_holds_previous_reading_during_transcript_view() {
         let text = "Showing detailed transcript · ctrl+o to toggle";
@@ -437,6 +553,20 @@ mod tests {
     fn idle_on_quoted_mention_of_the_interrupt_hint() {
         let text = "matching \"esc to interrupt\", \"ctrl+c to interrupt\"";
         assert_eq!(classify(text), AgentState::Idle);
+    }
+
+    #[test]
+    fn idle_on_prose_mentioning_the_interrupt_hint() {
+        // Unquoted mentions in transcript prose; only the footer ends a line
+        // with the hint.
+        assert_eq!(
+            classify("Press `esc to interrupt` the agent at any time."),
+            AgentState::Idle
+        );
+        assert_eq!(
+            classify("the footer shows esc to interrupt while a turn runs"),
+            AgentState::Idle
+        );
     }
 
     #[test]

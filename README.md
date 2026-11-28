@@ -291,6 +291,11 @@ visible work clears a stale blocked, and claude's empty input box with no
 work showing clears a stale working or blocked. When the agent isn't visible
 (e.g. a hidden nvim buffer), the hook is trusted as is.
 
+## Support
+
+If tmux-agents is useful to you, consider giving it a ⭐ on
+[GitHub](https://github.com/davychhouk/tmux-agents). It helps others find it.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
